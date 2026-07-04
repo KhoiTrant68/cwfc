@@ -1,0 +1,14 @@
+# Core (tất cả script)
+torch
+numpy
+
+# derisk_mixture_entropy.py — coder rANS thật + backbone LIC
+compressai
+pillow
+torchvision
+
+# derisk_dp.py — backbone VAE + perceptual metric (chỉ cần cho chế độ "real")
+diffusers      # --backbone vae (Stable-Diffusion VAE)
+lpips          # --percep lpips
+
+# wflow_endpoint.py self-test: chỉ cần torch (WFlowAdapter cần checkout W-Flow riêng)
