@@ -335,6 +335,63 @@ def _plan_and_cost(xf_a, xf_b, cy, eta, eps, iters=150):
     return P, cx
 
 
+# ---------------------------------------------------------------------------
+# Potential-based (NON-detached) Sinkhorn divergence  — the geomloss-style loss
+# the G1 finding points to for the perception/diversity axis. Unlike the
+# plan-detach <P, c_x> loss above (which only barycentrically matches means),
+# gradient here flows through the entropic dual potentials, so the gen->gen term
+# is a PROPER distribution divergence that actively penalises mode collapse.
+# ---------------------------------------------------------------------------
+
+
+def _ot_eps(C, eps, iters=100):
+    """
+    Entropic OT value in dual form, differentiable w.r.t. the cost C.
+
+    Sinkhorn iterations run detached (cheap, no unrolled graph); a single final
+    update through the grad-carrying C then makes the potentials depend on C, so
+    autodiff recovers the correct envelope-theorem gradient  d OT / d C = P
+    without holding the whole recursion in memory. Uniform marginals.
+    """
+    N, M = C.shape
+    log_a = torch.full((N,), -math.log(N), device=C.device)
+    log_b = torch.full((M,), -math.log(M), device=C.device)
+    Cd = C.detach()
+    with torch.no_grad():
+        f = torch.zeros(N, device=C.device)
+        g = torch.zeros(M, device=C.device)
+        for _ in range(iters):
+            f = eps * log_a - eps * torch.logsumexp((-Cd + g[None, :]) / eps, dim=1)
+            g = eps * log_b - eps * torch.logsumexp((-Cd + f[:, None]) / eps, dim=0)
+    # one differentiable pass through the real (grad-carrying) cost C
+    f = eps * log_a - eps * torch.logsumexp((-C + g[None, :]) / eps, dim=1)
+    g = eps * log_b - eps * torch.logsumexp((-C + f[:, None]) / eps, dim=0)
+    return (torch.exp(log_a) * f).sum() + (torch.exp(log_b) * g).sum()
+
+
+def sinkhorn_div_loss(xf_hat, xf, cy, eta, eps, iters=100):
+    """
+    Debiased Sinkhorn divergence with the extended (image + condition) cost:
+
+        S = OT_eps(x_hat, x) - 1/2 OT_eps(x_hat, x_hat)      (+ const OT(x, x))
+
+    Zero iff the generated distribution equals the real one, so minimising it
+    matches SPREAD as well as mean -> gives the diversity/perception endpoint a
+    real gradient (the endpoint the plan-detach losses structurally collapse).
+    The condition geometry cy enters both terms identically (paired conditions),
+    so eta still tunes fidelity<->perception exactly as in the detached losses.
+    """
+    def cost(a, b):
+        cx = torch.cdist(a, b).pow(2) / a.shape[1]
+        with torch.no_grad():
+            scale = cx[cx > 0].mean().clamp(min=1e-9)
+        return cx / scale + eta * cy
+
+    ot_ab = _ot_eps(cost(xf_hat, xf), eps, iters)
+    ot_aa = _ot_eps(cost(xf_hat, xf_hat), eps, iters)   # OT(x,x) is const -> dropped
+    return ot_ab - 0.5 * ot_aa
+
+
 def train_one(ae, data, embed_kind, eta, y_shape, steps, N, eps, lr, device, seed,
               loss_kind="debiased", debias_w=0.5):
     set_seed(seed)
@@ -348,16 +405,23 @@ def train_one(ae, data, embed_kind, eta, y_shape, steps, N, eps, lr, device, see
         xf_hat, xf = x_hat.flatten(1), x.flatten(1)
         with torch.no_grad():
             cy = cond_cost(y_hat, embed)                 # shared condition geometry
-        # gen -> real transport (the fidelity-driving term, == crude A1 loss)
-        P_gr, cx_gr = _plan_and_cost(xf_hat, xf, cy, eta, eps)
-        loss = (P_gr * cx_gr).sum()
-        if loss_kind == "debiased":
-            # -1/2 * gen->gen transport: the Sinkhorn-divergence debiasing term.
-            # It rewards SPREAD among generated samples -> defeats the regress-to-
-            # mean collapse of squared-cost matching -> restores the perception
-            # (diverse-sampling) endpoint at low eta. (W-Flow gen-to-gen map.)
-            P_gg, cx_gg = _plan_and_cost(xf_hat, xf_hat.detach(), cy, eta, eps)
-            loss = loss - debias_w * (P_gg * cx_gg).sum()
+        if loss_kind == "potential":
+            # NON-detached Sinkhorn divergence: gradient flows through the dual
+            # potentials, so the gen->gen term is a proper distribution divergence
+            # (defeats collapse by matching spread, not just the mean). The fix
+            # the G1 finding localises to G4 / W-Flow generative-OT machinery.
+            loss = sinkhorn_div_loss(xf_hat, xf, cy, eta, eps)
+        else:
+            # gen -> real transport (the fidelity-driving term, == crude A1 loss)
+            P_gr, cx_gr = _plan_and_cost(xf_hat, xf, cy, eta, eps)
+            loss = (P_gr * cx_gr).sum()
+            if loss_kind == "debiased":
+                # -1/2 * gen->gen transport: the Sinkhorn-divergence debiasing term.
+                # It rewards SPREAD among generated samples -> defeats the regress-to-
+                # mean collapse of squared-cost matching -> restores the perception
+                # (diverse-sampling) endpoint at low eta. (W-Flow gen-to-gen map.)
+                P_gg, cx_gg = _plan_and_cost(xf_hat, xf_hat.detach(), cy, eta, eps)
+                loss = loss - debias_w * (P_gg * cx_gg).sum()
         opt.zero_grad(); loss.backward(); opt.step()
 
     # eval
@@ -424,9 +488,12 @@ def main():
                     default=[0.0, 0.1, 0.3, 1.0, 3.0, 10.0, 100.0])
     ap.add_argument("--embeds", type=str, nargs="+",
                     default=["raw", "proj8", "pool"])
-    ap.add_argument("--loss", choices=["debiased", "crude"], default="debiased",
-                    help="debiased = Sinkhorn-divergence (perception endpoint restored); "
-                         "crude = A1 plan-weighted P-detach (regress-to-mean baseline)")
+    ap.add_argument("--loss", choices=["debiased", "crude", "potential"],
+                    default="debiased",
+                    help="crude = A1 plan-weighted P-detach (regress-to-mean baseline); "
+                         "debiased = adds detached gen-gen debias term; "
+                         "potential = NON-detached Sinkhorn divergence (geomloss-style, "
+                         "gradient through potentials -> best shot at the diversity axis)")
     ap.add_argument("--debias_w", type=float, default=0.5,
                     help="weight of the gen-gen debiasing term (raise if diversity "
                          "stays collapsed at full budget)")
