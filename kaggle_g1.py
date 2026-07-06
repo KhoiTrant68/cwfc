@@ -32,12 +32,19 @@ import torch
 import g1_pilot as g1
 
 
-def setup(dataset="cifar", H=32, N=1024, ae_steps=3000, seed=0, device=None):
-    """Build data + train-and-freeze the tiny quantized AE once. Returns a ctx."""
+def setup(dataset="cifar", H=32, N=1024, ae_steps=3000, seed=0, device=None,
+          data_root="./data", download=False, ae_zc=4, ae_qscale=1.0):
+    """Build data + train-and-freeze the tiny quantized AE once. Returns a ctx.
+
+    Weaken the AE (smaller ae_zc, coarser ae_qscale ~0.5) so a real residual
+    exists and a D-P frontier is measurable — an AE at ~25 dB pins the generator
+    at the fidelity ceiling and flattens the frontier (see the CIFAR-100 null).
+    """
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     g1.set_seed(seed)
-    data = g1.make_dataset(dataset, H, seed=seed, device=device)
-    ae = g1.TinyAE().to(device)
+    data = g1.make_dataset(dataset, H, seed=seed, device=device,
+                           root=data_root, download=download)
+    ae = g1.TinyAE(zc=ae_zc, qscale=ae_qscale).to(device)
     rec = g1.train_ae(ae, data, steps=ae_steps, N=N, lr=1e-3, device=device)
     with torch.no_grad():
         x = data.sample(N)
@@ -58,11 +65,11 @@ def run_geom(ctx, etas, embeds=("raw", "proj8", "pool"), eps=0.05):
 
 def run_frontier(ctx, etas, embeds=("raw", "proj8", "pool"), seeds=(0, 1, 2),
                  steps=4000, eps=0.05, lr=1e-3, loss="debiased", debias_w=0.5,
-                 out=None):
+                 K=1, out=None):
     embeds = [(e, e) for e in embeds]
     res = g1.frontier(ctx["ae"], ctx["data"], embeds, etas, ctx["y_shape"],
                       steps, ctx["N"], eps, lr, ctx["device"], list(seeds),
-                      loss_kind=loss, debias_w=debias_w)
+                      loss_kind=loss, debias_w=debias_w, K=K)
     if out:
         import json
         with open(out, "w") as f:

@@ -74,12 +74,25 @@ Trả lời ba câu hỏi PASS/KILL của G1 (Phần 5):
    `Var_z[G(z,ŷ)]`** (bắt mode-collapse).
 
 **Thành phần:** AE conv lượng tử (train trước, đóng băng) → ŷ; generator conv nhỏ
-`G(z,ŷ)`; loss extended-cost. Hai bản loss:
+`G(z,ŷ)`; loss extended-cost. Ba bản loss:
 - `--loss crude` — đúng công thức A1 (plan-weighted, P detach). Ở ảnh, squared-cost
   làm generator hồi quy về trung bình có điều kiện → collapse (đối chứng).
 - `--loss debiased` (mặc định) — thêm số hạng **gen-gen của Sinkhorn divergence**
-  (bản "barycentric debiased" mà Mục 2.5/3.7 chỉ tới) để thưởng độ trải mẫu sinh,
-  khôi phục đầu mút perception.
+  (bản "barycentric debiased" mà Mục 2.5/3.7 chỉ tới) để thưởng độ trải mẫu sinh.
+- `--loss potential` — **Sinkhorn divergence KHÔNG-detach** (kiểu geomloss): gradient
+  chảy qua potential đối ngẫu nên số hạng gen-gen là một divergence phân phối thật.
+  Đây là hướng mà phát hiện G1 chỉ tới cho trục perception/diversity.
+
+**Hai núm quyết định frontier có ĐO ĐƯỢC hay không** (thêm sau lần chạy null trên
+CIFAR-100, nơi AE quá mạnh và OT cấp-tổng-hợp không ép được đa dạng trong-điều-kiện):
+- `--ae_qscale` (mặc định 1.0) / `--ae_zc` (mặc định 4) — **làm yếu AE** để có residual
+  thật. Nếu AE quantized-recon đã ~25 dB thì generator chạm trần fidelity ngay ở η=0 và
+  frontier co về một điểm. Đặt `--ae_qscale 0.5` (bước lượng tử thô gấp đôi) và/hoặc
+  `--ae_zc 2` để kéo AE về ~18–20 dB, mở lại chỗ cho núm η và cho đầu mút perception.
+- `--K` (mặc định 1) — **K mẫu z mỗi điều kiện**. OT trên marginal `{x̂}`↔`{x}` KHÔNG ép
+  đa dạng *trong* một điều kiện (một map tất định theo ŷ đã khớp marginal). Với `K>1`,
+  mỗi ŷ được lặp K lần và plan extended-cost ánh xạ K bản đó sang các real láng giềng
+  (cùng ŷ, khác mode residual) qua c_y → buộc z phải được DÙNG để phủ chúng.
 
 **Metric:** PSNR (fidelity, ↑) · MMD-RFF (realism, ↓) · `Var_z` (diversity: cao ở
 η thấp, →0 khi η→∞; ~0 ở MỌI η = collapse).
@@ -90,15 +103,23 @@ CIFAR-10 tự tải qua torchvision (bật Internet trong Kaggle, hoặc add dat
 `root`). Cell notebook sẵn: xem `kaggle_g1.py`.
 
 ```bash
-# Bản chính: CIFAR, 3 embedding, quét η, 2–3 seed, lưu JSON
-python g1_pilot.py --dataset cifar --H 32 --mode both \
-    --N 1024 --steps 4000 --ae_steps 3000 \
+# Bản CHÍNH (đã tính tới bài học CIFAR-100): AE YẾU + K>1 để có frontier đo được.
+# cifar100 đọc trực tiếp pickle từ Kaggle dataset; đa GPU tự chia job.
+python g1_pilot.py --dataset cifar100 \
+    --data_root /kaggle/input/datasets/fedesoriano/cifar100 \
+    --H 32 --mode both --N 1024 --steps 4000 --ae_steps 3000 \
+    --ae_qscale 0.5 --ae_zc 2 --K 4 --eps 0.02 \
     --seeds 0 1 2 --etas 0 0.1 0.3 1 3 10 100 \
-    --embeds raw proj8 pool --loss debiased --out g1_cifar.json
+    --embeds raw proj8 pool --loss potential --out g1_potential.json
 
-# Đối chứng loss thô (kỳ vọng collapse ở ảnh) — chỉ để so
-python g1_pilot.py --dataset cifar --H 32 --N 1024 --steps 4000 \
-    --embeds pool --loss crude --out g1_crude.json
+# So loss trên CÙNG AE-yếu + K>1 (crude vs debiased vs potential)
+python g1_pilot.py --dataset cifar100 --data_root <path> --H 32 \
+    --ae_qscale 0.5 --ae_zc 2 --K 4 --N 1024 --steps 4000 \
+    --embeds pool --loss debiased --out g1_debiased.json
+
+# Đối chứng "AE mạnh, K=1" (tái hiện lần null trước) — chỉ để so
+python g1_pilot.py --dataset cifar100 --data_root <path> --H 32 \
+    --N 1024 --steps 4000 --embeds pool --loss debiased --out g1_null.json
 
 # Smoke nhanh (synth, không download) để kiểm plumbing trước
 python g1_pilot.py --smoke
@@ -137,3 +158,20 @@ steps lớn (1024 / ≥4000) như toy E3.
 (PASS phần đó); trục perception/diversity khoanh đúng chỗ cần G4. Nếu ở Kaggle với
 mọi knob trên mà `Var_z` vẫn collapse → xác nhận loss plan-detach không đủ, chuyển
 sang Sinkhorn-divergence potential-based (geomloss-style) — là hạng mục đã định vị.
+
+### Lần chạy thật CIFAR-100 (Kaggle 2×GPU) — null result và bài học
+
+`debiased`, AE mặc định (qscale=1, zc=4), N=1024, 4000 steps: **PSNR phẳng 25.48→25.75
+dB** qua mọi η/embedding (mức nhiễu) và **`Var_z~2e-7` collapse khắp nơi**. Hai nguyên
+nhân *cấu trúc*, không phải budget:
+1. AE đã đạt **25.16 dB** quantized-recon → generator chạm trần fidelity ngay ở η=0
+   (Q1 `diag_mass`=0.75 ở η=0) → không còn chỗ cho frontier. Đường 14→29 trên synth là
+   nhờ residual 2-mode *thiết kế sẵn* mà CIFAR không có.
+2. OT cấp-**tổng-hợp** (crude/debiased/**và potential**) chỉ khớp marginal `{x̂}`↔`{x}`;
+   vì mỗi i có ŷ_i riêng, generator khớp marginal bằng map *tất định theo điều kiện* →
+   không bao giờ ép đa dạng *trong* một điều kiện.
+
+⇒ Cách chữa đã cài (`--ae_qscale`/`--ae_zc` để có residual, `--K>1` để ép đa dạng
+trong-điều-kiện, `--loss potential`). Nếu **AE-yếu + K>1 + potential** vẫn để `Var_z`
+collapse ⇒ xác nhận surrogate cấp-tổng-hợp về nguyên tắc không đủ, perception endpoint =
+khớp `p(x|ŷ)` = đúng việc của conditional-OT trong W-Flow (**G4**).

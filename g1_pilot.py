@@ -36,11 +36,29 @@ Metrics:
     diversity = Var_z[G(z, y_hat)] at fixed condition (catches mode collapse:
                 ~0 everywhere => the generator ignores its noise)
 
+TWO controls that decide whether a D-P frontier is even MEASURABLE (added after
+the CIFAR-100 null run, where the AE was too strong and aggregate-OT could not
+force within-condition diversity):
+    --ae_qscale / --ae_zc : WEAKEN the frozen AE so a real unresolvable residual
+                exists. If AE quantized-recon already ~25 dB the generator hits
+                the fidelity ceiling at eta=0 and the frontier collapses to a
+                point; drop AE to ~18-20 dB (coarser qscale ~0.5, smaller zc) to
+                open room for the knob and for the perception endpoint.
+    --K       : draw K noise samples PER CONDITION. Aggregate-OT over the marginal
+                {x_hat}<->{x} does NOT force diversity WITHIN a condition (a
+                deterministic per-condition map already matches the marginal). With
+                K>1 each y_hat is repeated K times and the extended-cost plan maps
+                its K draws onto real neighbours (similar y_hat, different residual
+                mode) via c_y, so z must be USED to cover them. K=1 == old behaviour.
+
 Datasets:
     synth : procedurally generated small images with a KNOWN residual mode the
             coarse quantized condition cannot resolve -> a genuine D-P frontier,
             zero downloads. This is the smoke/sanity dataset.
-    cifar : torchvision CIFAR-10 (needs the dataset available/downloaded).
+    cifar : torchvision CIFAR-10. KHONG tu download nua — mac dinh doc data da
+            tai san o --data_root (dung download_cifar.py hoac Kaggle dataset).
+            Them co --download neu van muon torchvision tu tai.
+    cifar100 : doc truc tiep pickle 'train' (Kaggle fedesoriano/cifar100).
 
 Runs on CPU. Use --smoke for a fast end-to-end check.
 """
@@ -174,23 +192,83 @@ class SynthImages:
         return x
 
 
-def make_dataset(name, H, seed, device):
+class _Wrap:
+    """Bọc một pool ảnh cố định (N,3,H,W) thành dataset có .sample(n)."""
+
+    def __init__(self, pool):
+        self.pool = pool
+
+    def sample(self, n):
+        idx = torch.randint(0, self.pool.shape[0], (n,))
+        return self.pool[idx]
+
+
+def _load_cifar100_images(root, max_n=5000):
+    """
+    Đọc ảnh CIFAR-100 trực tiếp từ file pickle 'train' (bản python gốc của
+    Krizhevsky — đúng format các Kaggle dataset như fedesoriano/cifar100).
+    Tìm đệ quy file tên 'train' dưới root nên trỏ --data_root thẳng vào
+    /kaggle/input/... là được, không cần copy. Nhãn bị bỏ qua (thí nghiệm
+    chỉ cần ảnh). Nếu chỉ có tar.gz thì giải nén tạm ra ./data rồi đọc.
+    Trả về tensor float (N,3,32,32) trong [0,1].
+    """
+    import os
+    import pickle
+    import tarfile
+
+    train_path = None
+    for dirpath, _, files in os.walk(root):
+        if "train" in files:
+            train_path = os.path.join(dirpath, "train")
+            break
+    if train_path is None:
+        # có thể dataset chỉ chứa cifar-100-python.tar.gz -> giải nén ra chỗ ghi được
+        tar = None
+        for dirpath, _, files in os.walk(root):
+            for fn in files:
+                if fn.endswith(".tar.gz"):
+                    tar = os.path.join(dirpath, fn)
+        if tar is not None:
+            os.makedirs("./data", exist_ok=True)
+            with tarfile.open(tar, "r:gz") as t:
+                t.extractall("./data")
+            return _load_cifar100_images("./data", max_n)
+        raise FileNotFoundError(
+            f"Khong tim thay file pickle 'train' (hoac .tar.gz) duoi {root}. "
+            f"Kiem tra lai duong dan --data_root.")
+
+    with open(train_path, "rb") as f:
+        d = pickle.load(f, encoding="bytes")
+    data = d[b"data"][:max_n]                      # (n, 3072) uint8, row-major RGB
+    x = torch.from_numpy(data.reshape(-1, 3, 32, 32).copy()).float() / 255.0
+    print(f"cifar100: doc {x.shape[0]} anh tu {train_path}")
+    return x
+
+
+def make_dataset(name, H, seed, device, root="./data", download=False):
     if name == "synth":
         return SynthImages(H=H, seed=seed, device=device)
     if name == "cifar":
+        import os
         from torchvision import datasets, transforms
+        if not download and not os.path.isdir(
+                os.path.join(root, "cifar-10-batches-py")):
+            raise FileNotFoundError(
+                f"Khong tim thay {root}/cifar-10-batches-py.\n"
+                f"Hay tai truoc bang:  python download_cifar.py --root {root}\n"
+                f"hoac tren Kaggle: add dataset CIFAR-10 python roi giai nen "
+                f"tar.gz vao {root}/ (xem huong dan), "
+                f"hoac chay lai voi --download neu muon torchvision tu tai.")
         tf = transforms.Compose([transforms.Resize(H), transforms.ToTensor()])
-        ds = datasets.CIFAR10(root="./data", train=True, download=True, transform=tf)
+        ds = datasets.CIFAR10(root=root, train=True, download=download,
+                              transform=tf)
         imgs = torch.stack([ds[i][0] for i in range(min(len(ds), 5000))]).to(device)
-
-        class _Wrap:
-            def __init__(self, pool):
-                self.pool = pool
-
-            def sample(self, n):
-                idx = torch.randint(0, self.pool.shape[0], (n,))
-                return self.pool[idx]
         return _Wrap(imgs)
+    if name == "cifar100":
+        x = _load_cifar100_images(root)            # (N,3,32,32) in [0,1]
+        if H != 32:
+            x = F.interpolate(x, size=(H, H), mode="bilinear", align_corners=False)
+        return _Wrap(x.to(device))
     raise ValueError(name)
 
 
@@ -200,8 +278,9 @@ def make_dataset(name, H, seed, device):
 
 
 class TinyAE(nn.Module):
-    def __init__(self, ch=32, zc=4):
+    def __init__(self, ch=32, zc=4, qscale=1.0):
         super().__init__()
+        self.zc = zc
         self.enc = nn.Sequential(
             nn.Conv2d(3, ch, 4, 2, 1), nn.GELU(),
             nn.Conv2d(ch, ch, 4, 2, 1), nn.GELU(),   # 4x downsample -> drops high-freq
@@ -212,7 +291,9 @@ class TinyAE(nn.Module):
             nn.ConvTranspose2d(ch, ch, 4, 2, 1), nn.GELU(),
             nn.ConvTranspose2d(ch, 3, 4, 2, 1),
         )
-        self.qscale = 1.0   # coarse quantization step -> loses the texture mode
+        # coarse quantization step -> loses the texture mode. SMALLER qscale =
+        # coarser grid (step 1/qscale) = weaker AE = more residual for G to model.
+        self.qscale = qscale
 
     def encode(self, x):
         return self.enc(x * 2 - 1)
@@ -287,10 +368,15 @@ def make_embed(kind, y_shape, seed=0, device="cpu"):
     raise ValueError(kind)
 
 
-def cond_cost(y_hat, embed):
-    e = embed(y_hat)
-    cy = torch.cdist(e, e).pow(2)
+def _cy(e_a, e_b):
+    """Normalised squared condition cost between two embedded condition sets."""
+    cy = torch.cdist(e_a, e_b).pow(2)
     return cy / cy[cy > 0].mean().clamp(min=1e-9)
+
+
+def cond_cost(y_hat, embed):
+    """Square self condition cost (used by the training-free geom probe)."""
+    return _cy(embed(y_hat), embed(y_hat))
 
 
 # ---------------------------------------------------------------------------
@@ -369,7 +455,15 @@ def _ot_eps(C, eps, iters=100):
     return (torch.exp(log_a) * f).sum() + (torch.exp(log_b) * g).sum()
 
 
-def sinkhorn_div_loss(xf_hat, xf, cy, eta, eps, iters=100):
+def _ext_cost(a, b, cy, eta):
+    """Normalised image cost + eta * (detached) condition cost, differentiable in a,b."""
+    cx = torch.cdist(a, b).pow(2) / a.shape[1]
+    with torch.no_grad():
+        scale = cx[cx > 0].mean().clamp(min=1e-9)
+    return cx / scale + eta * cy
+
+
+def sinkhorn_div_loss(xf_hat, xf, cy_ab, cy_aa, eta, eps, iters=100):
     """
     Debiased Sinkhorn divergence with the extended (image + condition) cost:
 
@@ -378,53 +472,54 @@ def sinkhorn_div_loss(xf_hat, xf, cy, eta, eps, iters=100):
     Zero iff the generated distribution equals the real one, so minimising it
     matches SPREAD as well as mean -> gives the diversity/perception endpoint a
     real gradient (the endpoint the plan-detach losses structurally collapse).
-    The condition geometry cy enters both terms identically (paired conditions),
-    so eta still tunes fidelity<->perception exactly as in the detached losses.
+    cy_ab is the gen<->real condition cost, cy_aa the gen<->gen one (they differ
+    once K>1, i.e. the generated batch is larger than the real batch).
     """
-    def cost(a, b):
-        cx = torch.cdist(a, b).pow(2) / a.shape[1]
-        with torch.no_grad():
-            scale = cx[cx > 0].mean().clamp(min=1e-9)
-        return cx / scale + eta * cy
-
-    ot_ab = _ot_eps(cost(xf_hat, xf), eps, iters)
-    ot_aa = _ot_eps(cost(xf_hat, xf_hat), eps, iters)   # OT(x,x) is const -> dropped
+    ot_ab = _ot_eps(_ext_cost(xf_hat, xf, cy_ab, eta), eps, iters)
+    ot_aa = _ot_eps(_ext_cost(xf_hat, xf_hat, cy_aa, eta), eps, iters)  # OT(x,x) const
     return ot_ab - 0.5 * ot_aa
 
 
 def train_one(ae, data, embed_kind, eta, y_shape, steps, N, eps, lr, device, seed,
-              loss_kind="debiased", debias_w=0.5):
+              loss_kind="debiased", debias_w=0.5, K=1):
     set_seed(seed)
     G = CondGenImg(zc=y_shape[0]).to(device)
     opt = torch.optim.Adam(G.parameters(), lr=lr)
     embed = make_embed(embed_kind, y_shape, seed=seed, device=device)
     for _ in range(steps):
-        x = data.sample(N)
-        y_hat = ae.condition(x)
-        x_hat = G(y_hat)
+        x = data.sample(N)                                # real batch (N)
+        y = ae.condition(x)
+        # K noise draws per condition: repeat each y_hat K times so the generated
+        # batch is (N*K), each row an independent z. K=1 -> identical to before.
+        y_gen = y if K == 1 else y.repeat_interleave(K, dim=0)
+        x_hat = G(y_gen)                                  # (N*K,3,H,W), indep z
         xf_hat, xf = x_hat.flatten(1), x.flatten(1)
         with torch.no_grad():
-            cy = cond_cost(y_hat, embed)                 # shared condition geometry
+            e_gen = embed(y_gen)                          # (N*K,d)
+            e_real = e_gen if K == 1 else embed(y)        # (N,d)
+            cy_gr = _cy(e_gen, e_real)                    # gen x real  (N*K,N)
+            need_gg = loss_kind in ("debiased", "potential")
+            cy_gg = _cy(e_gen, e_gen) if need_gg else None   # gen x gen (N*K,N*K)
         if loss_kind == "potential":
             # NON-detached Sinkhorn divergence: gradient flows through the dual
             # potentials, so the gen->gen term is a proper distribution divergence
             # (defeats collapse by matching spread, not just the mean). The fix
             # the G1 finding localises to G4 / W-Flow generative-OT machinery.
-            loss = sinkhorn_div_loss(xf_hat, xf, cy, eta, eps)
+            loss = sinkhorn_div_loss(xf_hat, xf, cy_gr, cy_gg, eta, eps)
         else:
             # gen -> real transport (the fidelity-driving term, == crude A1 loss)
-            P_gr, cx_gr = _plan_and_cost(xf_hat, xf, cy, eta, eps)
+            P_gr, cx_gr = _plan_and_cost(xf_hat, xf, cy_gr, eta, eps)
             loss = (P_gr * cx_gr).sum()
             if loss_kind == "debiased":
                 # -1/2 * gen->gen transport: the Sinkhorn-divergence debiasing term.
                 # It rewards SPREAD among generated samples -> defeats the regress-to-
                 # mean collapse of squared-cost matching -> restores the perception
                 # (diverse-sampling) endpoint at low eta. (W-Flow gen-to-gen map.)
-                P_gg, cx_gg = _plan_and_cost(xf_hat, xf_hat.detach(), cy, eta, eps)
+                P_gg, cx_gg = _plan_and_cost(xf_hat, xf_hat.detach(), cy_gg, eta, eps)
                 loss = loss - debias_w * (P_gg * cx_gg).sum()
         opt.zero_grad(); loss.backward(); opt.step()
 
-    # eval
+    # eval  (single sample per condition -> paired PSNR / MMD; diversity over K=8 z)
     with torch.no_grad():
         x = data.sample(N)
         y_hat = ae.condition(x)
@@ -438,9 +533,9 @@ def train_one(ae, data, embed_kind, eta, y_shape, steps, N, eps, lr, device, see
 
 
 def frontier(ae, data, embeds, etas, y_shape, steps, N, eps, lr, device, seeds,
-             loss_kind="debiased", debias_w=0.5):
+             loss_kind="debiased", debias_w=0.5, K=1):
     print(f"\n=== Q2 frontier (PSNR up=fidelity, MMD down=realism, Div=Var_z) — "
-          f"steps={steps}, N={N}, seeds={list(seeds)}, loss={loss_kind} ===")
+          f"steps={steps}, N={N}, K={K}, seeds={list(seeds)}, loss={loss_kind} ===")
     out = {}
     for name, kind in embeds:
         print(f"\n embedding = {name}")
@@ -451,7 +546,8 @@ def frontier(ae, data, embeds, etas, y_shape, steps, N, eps, lr, device, seeds,
             for sd in seeds:
                 psnr, _, mmd, div = train_one(ae, data, kind, eta, y_shape,
                                               steps, N, eps, lr, device, sd,
-                                              loss_kind=loss_kind, debias_w=debias_w)
+                                              loss_kind=loss_kind, debias_w=debias_w,
+                                              K=K)
                 ps.append(psnr); md.append(mmd); dv.append(div)
             row = {"eta": eta, "psnr": float(np.mean(ps)), "psnr_std": float(np.std(ps)),
                    "mmd": float(np.mean(md)), "div": float(np.mean(dv))}
@@ -469,20 +565,132 @@ def frontier(ae, data, embeds, etas, y_shape, steps, N, eps, lr, device, seeds,
 
 
 # ---------------------------------------------------------------------------
+# Multi-GPU: cac lan train (embedding, eta, seed) doc lap hoan toan ->
+# chia job round-robin cho tung GPU, moi GPU mot process rieng (spawn).
+# KHONG dung DataParallel: model qua nho, chia job la cach song song dung.
+# ---------------------------------------------------------------------------
+
+
+def _rebuild_data(data_spec, device):
+    kind = data_spec[0]
+    if kind == "synth":
+        return SynthImages(H=data_spec[1], seed=0, device=device)
+    if kind == "pool":
+        return _Wrap(data_spec[1].to(device))
+    raise ValueError(kind)
+
+
+def _gpu_worker(dev, jobs, ae_state, data_spec, cfg, out_q):
+    """Chay trong process con: dung lai AE + data tren GPU cua minh roi train."""
+    try:
+        data = _rebuild_data(data_spec, dev)
+        ae = TinyAE(zc=cfg["ae_zc"], qscale=cfg["ae_qscale"]).to(dev)
+        ae.load_state_dict(ae_state)
+        ae.eval()
+        for p in ae.parameters():
+            p.requires_grad_(False)
+        for (name, kind, eta, sd) in jobs:
+            psnr, _, mmd, div = train_one(
+                ae, data, kind, eta, tuple(cfg["y_shape"]), cfg["steps"],
+                cfg["N"], cfg["eps"], cfg["lr"], dev, sd,
+                loss_kind=cfg["loss_kind"], debias_w=cfg["debias_w"], K=cfg["K"])
+            out_q.put(("ok", name, eta, sd, psnr, mmd, div, dev))
+    except Exception as e:
+        out_q.put(("err", repr(e), dev, None, None, None, None, None))
+
+
+def frontier_parallel(ae, data, embeds, etas, y_shape, steps, N, eps, lr,
+                      devices, seeds, loss_kind="debiased", debias_w=0.5, K=1,
+                      H=16, ae_zc=4, ae_qscale=1.0):
+    import torch.multiprocessing as mp
+
+    if isinstance(data, SynthImages):
+        data_spec = ("synth", H)
+    else:
+        data_spec = ("pool", data.pool.cpu())
+    ae_state = {k: v.cpu() for k, v in ae.state_dict().items()}
+    cfg = dict(y_shape=list(y_shape), steps=steps, N=N, eps=eps, lr=lr,
+               loss_kind=loss_kind, debias_w=debias_w, K=K,
+               ae_zc=ae_zc, ae_qscale=ae_qscale)
+
+    jobs = [(name, kind, eta, sd)
+            for name, kind in embeds for eta in etas for sd in seeds]
+    chunks = [jobs[i::len(devices)] for i in range(len(devices))]
+    print(f"\n=== Q2 frontier SONG SONG tren {devices} — {len(jobs)} job "
+          f"(steps={steps}, N={N}, K={K}, loss={loss_kind}) ===")
+
+    ctx = mp.get_context("spawn")
+    q = ctx.Queue()
+    procs = []
+    for dev, ch in zip(devices, chunks):
+        p = ctx.Process(target=_gpu_worker,
+                        args=(dev, ch, ae_state, data_spec, cfg, q))
+        p.start()
+        procs.append(p)
+
+    res = {}
+    for i in range(len(jobs)):
+        msg = q.get()
+        if msg[0] == "err":
+            for p in procs:
+                p.terminate()
+            raise RuntimeError(f"worker {msg[2]} loi: {msg[1]}")
+        _, name, eta, sd, psnr, mmd, div, dev = msg
+        res.setdefault((name, eta), []).append((psnr, mmd, div))
+        print(f"  [{i+1:>3}/{len(jobs)}] {dev}  {name:>6} eta={eta:<7g} seed={sd} "
+              f"-> PSNR={psnr:6.2f}  MMD={mmd:.3e}  Div={div:.3e}")
+    for p in procs:
+        p.join()
+
+    # gop ket qua ve dung format cua frontier()
+    out = {}
+    for name, _ in embeds:
+        print(f"\n embedding = {name}")
+        print(f"{'eta':>8} {'PSNR(dB)':>10} {'MMD':>12} {'Div(Var_z)':>12}")
+        rows = []
+        for eta in etas:
+            vals = res[(name, eta)]
+            ps = [v[0] for v in vals]; md = [v[1] for v in vals]
+            dv = [v[2] for v in vals]
+            rows.append({"eta": eta, "psnr": float(np.mean(ps)),
+                         "psnr_std": float(np.std(ps)),
+                         "mmd": float(np.mean(md)), "div": float(np.mean(dv))})
+            print(f"{eta:>8.3g} {np.mean(ps):>10.2f} {np.mean(md):>12.4e} "
+                  f"{np.mean(dv):>12.4e}")
+        out[name] = rows
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--dataset", choices=["synth", "cifar"], default="synth")
+    ap.add_argument("--dataset", choices=["synth", "cifar", "cifar100"],
+                    default="synth")
+    ap.add_argument("--data_root", type=str, default="./data",
+                    help="thu muc chua cifar-10-batches-py (data tai san)")
+    ap.add_argument("--download", action="store_true",
+                    help="cho phep torchvision tu tai CIFAR-10 (mac dinh TAT; "
+                         "dung download_cifar.py de tai truoc)")
     ap.add_argument("--mode", choices=["geom", "train", "both"], default="both")
     ap.add_argument("--H", type=int, default=16)
     ap.add_argument("--N", type=int, default=256)
     ap.add_argument("--steps", type=int, default=1500)
     ap.add_argument("--ae_steps", type=int, default=800)
+    ap.add_argument("--ae_zc", type=int, default=4,
+                    help="so kenh latent cua AE. Nho hon => AE yeu hon => nhieu "
+                         "residual de tao frontier (thu 2 de ha AE recon).")
+    ap.add_argument("--ae_qscale", type=float, default=1.0,
+                    help="do min luong tu AE (buoc = 1/qscale). NHO hon => tho hon "
+                         "=> AE yeu hon. Dat ~0.5 de keo AE recon xuong ~18-20 dB.")
     ap.add_argument("--eps", type=float, default=0.05)
     ap.add_argument("--lr", type=float, default=1e-3)
+    ap.add_argument("--K", type=int, default=1,
+                    help="so mau z moi dieu kien. >1 ep da dang TRONG dieu kien "
+                         "(chi phi: batch sinh thanh N*K).")
     ap.add_argument("--seeds", type=int, nargs="+", default=[0, 1])
     ap.add_argument("--etas", type=float, nargs="+",
                     default=[0.0, 0.1, 0.3, 1.0, 3.0, 10.0, 100.0])
@@ -497,6 +705,9 @@ def main():
     ap.add_argument("--debias_w", type=float, default=0.5,
                     help="weight of the gen-gen debiasing term (raise if diversity "
                          "stays collapsed at full budget)")
+    ap.add_argument("--devices", type=str, nargs="+", default=None,
+                    help="danh sach device de train song song, vd: cuda:0 cuda:1. "
+                         "Mac dinh: tu dong dung TAT CA GPU thay (hoac cpu).")
     ap.add_argument("--out", type=str, default=None,
                     help="path to save results JSON (e.g. g1_result.json)")
     ap.add_argument("--smoke", action="store_true",
@@ -508,14 +719,22 @@ def main():
         args.seeds = [0]
         args.etas = [0.0, 0.3, 1.0, 3.0, 30.0]
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"device={device}  dataset={args.dataset}  H={args.H}  "
-          f"embeds={args.embeds}  etas={args.etas}")
+    if args.devices is not None:
+        devices = args.devices
+    elif torch.cuda.is_available():
+        devices = [f"cuda:{i}" for i in range(torch.cuda.device_count())]
+    else:
+        devices = ["cpu"]
+    device = devices[0]          # AE + geom probe chay tren device dau tien
+    print(f"devices={devices}  dataset={args.dataset}  H={args.H}  "
+          f"embeds={args.embeds}  etas={args.etas}  K={args.K}  "
+          f"ae_zc={args.ae_zc} ae_qscale={args.ae_qscale}")
 
     set_seed(0)
-    data = make_dataset(args.dataset, args.H, seed=0, device=device)
+    data = make_dataset(args.dataset, args.H, seed=0, device=device,
+                        root=args.data_root, download=args.download)
 
-    ae = TinyAE().to(device)
+    ae = TinyAE(zc=args.ae_zc, qscale=args.ae_qscale).to(device)
     rec = train_ae(ae, data, steps=args.ae_steps, N=args.N, lr=1e-3, device=device)
     with torch.no_grad():
         x = data.sample(args.N)
@@ -531,15 +750,24 @@ def main():
         geom_probe(ae, data, embeds, args.etas, args.N, args.eps, device)
     results = None
     if args.mode in ("train", "both"):
-        results = frontier(ae, data, embeds, args.etas, y_shape, args.steps,
-                           args.N, args.eps, args.lr, device, args.seeds,
-                           loss_kind=args.loss, debias_w=args.debias_w)
+        if len(devices) > 1:
+            results = frontier_parallel(ae, data, embeds, args.etas, y_shape,
+                                        args.steps, args.N, args.eps, args.lr,
+                                        devices, args.seeds,
+                                        loss_kind=args.loss,
+                                        debias_w=args.debias_w, K=args.K, H=args.H,
+                                        ae_zc=args.ae_zc, ae_qscale=args.ae_qscale)
+        else:
+            results = frontier(ae, data, embeds, args.etas, y_shape, args.steps,
+                               args.N, args.eps, args.lr, device, args.seeds,
+                               loss_kind=args.loss, debias_w=args.debias_w, K=args.K)
 
     if args.out and results is not None:
         import json
         payload = {"config": {k: getattr(args, k) for k in
-                              ["dataset", "H", "N", "steps", "ae_steps", "eps",
-                               "lr", "seeds", "etas", "embeds", "loss", "debias_w"]},
+                              ["dataset", "H", "N", "steps", "ae_steps", "ae_zc",
+                               "ae_qscale", "eps", "lr", "K", "seeds", "etas",
+                               "embeds", "loss", "debias_w"]},
                    "ae_recon_psnr": ae_psnr, "y_shape": list(y_shape),
                    "frontier": results}
         with open(args.out, "w") as f:
