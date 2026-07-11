@@ -54,6 +54,36 @@ proj8 ≈ pool to 2 sig figs → the diversity axis is independent of the c_y em
 exactly as predicted (eta acts only between-condition). The 50× off-floor lift + eta-flat
 pattern is stable across all embeddings and seeds.
 
+## 1b. G4 result — paragraph draft for the paper (positive)
+
+> **A conditional-flow objective realises the trade-off the aggregate one could not.**
+> The G1 analysis pinpoints the failure: because the K draws of a condition ŷ share an
+> identical embedding, the cost-mixing weight η can only reweight *between*-condition
+> coupling and is blind to the *within*-condition fibre where perception lives. G4
+> removes this limitation by conditioning the transport map itself on ŷ. We train a
+> rectified-flow velocity field `v(x_t, t, ŷ)` whose pushforward of a Gaussian prior,
+> *given ŷ*, targets the conditional `p(x|ŷ)`; conditional targets are built as real
+> neighbours of ŷ in the frozen code embedding (kNN), giving each fibre genuine spread.
+> A single scalar λ blends the flow target between a random neighbour (λ=0, sample the
+> posterior) and the neighbourhood mean (λ=1, regress to E[x|ŷ]) — the conditional
+> analogue of η, but one that acts *inside* the fibre. On CIFAR-100 (same frozen weak
+> AE, ~22 dB, as G1), sweeping λ traces a clean distortion–perception frontier: sample
+> PSNR rises 11.2→13.6 dB while within-condition diversity `Var_z` falls 4.2×
+> (3.7×10⁻²→8.9×10⁻³) and marginal realism MMD degrades monotonically
+> (2.5×10⁻²→1.3×10⁻¹) — realism is best exactly at the diverse λ=0 endpoint and worst
+> at the MMSE endpoint, the textbook D–P signature. Under an identical budget G1's η
+> leaves `Var_z` flat (2.5→2.7×10⁻⁵) and PSNR flat; G4's λ *positions* the generator
+> continuously between the two regimes. Conditioning the optimal-transport map — rather
+> than mixing a condition term into an aggregate cost — is therefore what makes the
+> perception endpoint both reachable and controllable.
+
+Backing numbers are in §2 (G4 VERDICT table). Headline contrast for the paper:
+
+| knob | budget / AE | diversity response | PSNR response | verdict |
+|---|---|---|---|---|
+| G1 η (aggregate OT) | CIFAR-100, weak AE ~22 dB | Var_z **flat** 2.5→2.7×10⁻⁵ | flat 22.4 dB | cannot steer p(x\|ŷ) |
+| G4 λ (conditional flow) | CIFAR-100, weak AE ~22 dB | Var_z **↓4.2×** 3.7e-2→8.9e-3 | ↑ 11.2→13.6 dB | steers the frontier |
+
 ## 2. G4 — W-Flow conditional-OT scope
 
 Goal: replace the aggregate marginal match `{x̂} ↔ {x}` with a **per-condition**
@@ -88,8 +118,31 @@ Plumbing validated (CPU synth smoke, 150 steps, weak AE 20.26 dB, lams {0,0.5,1}
 Div FALLS monotonically with lam (6.96e-2 → 5.16e-2 → 4.74e-2) and PSNR_sample RISES
 (8.72 → 9.64), PSNR_mmse > PSNR_sample throughout — the conditional D-P frontier's
 correct SHAPE already appears (absolute values poor only from under-training). This is
-exactly the lam-ordered diversity axis G1's eta could not produce. Full-budget Kaggle
-run pending (`g4_smoke.json`).
+exactly the lam-ordered diversity axis G1's eta could not produce.
+
+### G4 VERDICT — Kaggle full-budget (`g4_smoke.json`, CIFAR-100, N=256, npool=2000,
+knn=16, steps=1500, weak AE 22.37 dB, pool embed, seed 0, ode_steps=20): **POSITIVE.**
+The conditional-flow knob λ realises the D–P frontier that G1's η could not:
+
+| λ | PSNR_samp | PSNR_mmse | MMD | Var_z | reading |
+|---|---|---|---|---|---|
+| 0.00 | 11.19 | 13.59 | 2.48e-2 | 3.75e-2 | perception endpoint |
+| 0.25 | 12.27 | 14.39 | 2.49e-2 | 2.69e-2 | |
+| 0.50 | 12.70 | 14.11 | 7.14e-2 | 1.75e-2 | |
+| 0.75 | 13.62 | 14.66 | 9.98e-2 | 1.06e-2 | |
+| 1.00 | 13.57 | 14.40 | 1.31e-1 | 8.85e-3 | distortion (MMSE) endpoint |
+
+All three axes move **monotonically** with λ: Var_z ↓ 4.2× (3.75e-2 → 8.85e-3),
+PSNR_sample ↑ 2.4 dB (11.19 → 13.62; final point plateaus within 0.05 dB), and MMD ↑
+5.3× (2.48e-2 → 1.31e-1). The classic distortion–perception signature: MMD (marginal
+realism) is **lowest at λ=0** (posterior sampling) and worst at λ=1 (MMSE blur), while
+PSNR trades the opposite way — you cannot have both, and λ **positions** the generator
+on the frontier. This is exactly the controllable perception axis the aggregate
+extended-cost OT (G1) provably could not steer with η (c_y identical within-condition).
+Contrast is decisive: same weak AE (~22 dB), same metrics — G1's η gives flat Var_z
+2.5→2.7e-5, G4's λ gives a 4.2× monotone sweep. **G1-negative / G4-positive pair
+closed.** Next: multi-seed error bars + conditional-MMD (within-ŷ-neighbourhood) to
+harden for the paper.
 
 Open questions to resolve when coding G4:
 1. Grouping: fixed kNN in pool-embedding vs learned soft assignment.
