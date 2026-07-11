@@ -140,6 +140,11 @@ def plot_g4(path, out):
 
 
 def plot_dp_plane(g1_path, g4_path, out, g1_embed=None):
+    have_g1 = bool(g1_path) and os.path.exists(g1_path)
+    have_g4 = bool(g4_path) and os.path.exists(g4_path)
+    if not (have_g1 or have_g4):
+        print("[skip] D-P plane: neither G1 nor G4 result present")
+        return
     fig, ax = plt.subplots(figsize=(6.5, 5))
 
     if g1_path and os.path.exists(g1_path):
