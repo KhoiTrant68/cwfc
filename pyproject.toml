@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cwfc"
+version = "0.1.0"
+description = "Compression as Conditional Optimal Transport — de-risk experiments and the G1-negative / G4-positive result pair"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { file = "LICENSE" }
+authors = [{ name = "Khoi Tran", email = "khoiminhtran68@gmail.com" }]
+keywords = [
+    "optimal-transport",
+    "learned-image-compression",
+    "distortion-perception",
+    "rectified-flow",
+    "sinkhorn",
+]
+
+# Core dependencies — enough to run the mechanism scripts (derisk_cot, g1_pilot,
+# g4_wflow, wflow_endpoint self-test).
+dependencies = ["torch", "numpy"]
+
+[project.optional-dependencies]
+# derisk_mixture_entropy.py — real rANS coder + LIC backbone
+entropy = ["compressai", "torchvision", "pillow"]
+# derisk_dp.py "real" mode — Stable-Diffusion VAE + LPIPS
+dp = ["diffusers", "lpips", "torchvision", "pillow"]
+# everything
+all = ["compressai", "torchvision", "pillow", "diffusers", "lpips"]
+
+[project.urls]
+Repository = "https://github.com/KhoiTrant68/cwfc"
+
+# Flat module layout: the experiment scripts stay importable and directly
+# runnable (`python g1_pilot.py`). Listing them here also makes `pip install -e .`
+# expose them as top-level modules.
+[tool.setuptools]
+py-modules = [
+    "derisk_cot",
+    "derisk_dp",
+    "derisk_mixture_entropy",
+    "wflow_endpoint",
+    "g1_pilot",
+    "kaggle_g1",
+    "g4_wflow",
+]

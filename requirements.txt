@@ -1,14 +1,14 @@
-# Core (tất cả script)
+# Core — all mechanism scripts (derisk_cot, g1_pilot, kaggle_g1, g4_wflow,
+# wflow_endpoint self-test)
 torch
 numpy
 
-# derisk_mixture_entropy.py — coder rANS thật + backbone LIC
+# derisk_mixture_entropy.py — real rANS coder + LIC backbone
 compressai
 pillow
 torchvision
 
-# derisk_dp.py — backbone VAE + perceptual metric (chỉ cần cho chế độ "real")
-diffusers      # --backbone vae (Stable-Diffusion VAE)
+# derisk_dp.py "real" mode — Stable-Diffusion VAE backbone + LPIPS metric
+# (the toy/feat modes need neither)
+diffusers      # --backbone vae
 lpips          # --percep lpips
-
-# wflow_endpoint.py self-test: chỉ cần torch (WFlowAdapter cần checkout W-Flow riêng)

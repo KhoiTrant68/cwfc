@@ -1,0 +1,20 @@
+cff-version: 1.2.0
+message: "If you use this code, please cite it as below."
+title: "CWFC — Compression as Conditional Optimal Transport"
+authors:
+  - family-names: Tran
+    given-names: Khoi
+    email: khoiminhtran68@gmail.com
+version: 0.1.0
+date-released: 2026-07-11
+url: "https://github.com/KhoiTrant68/cwfc"
+abstract: >-
+  De-risk experiments for learned image compression framed as conditional
+  optimal transport. The central result is a negative/positive pair: an aggregate
+  extended-cost OT objective cannot steer the conditional p(x|y_hat) with its
+  cost-mixing knob (G1), whereas a conditional rectified-flow objective can (G4).
+keywords:
+  - optimal transport
+  - learned image compression
+  - distortion-perception trade-off
+  - rectified flow

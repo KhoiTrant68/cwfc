@@ -1,0 +1,4 @@
+# Result artefacts are produced on Kaggle; ignore by default, keep the index.
+*.json
+*.csv
+!README.md
