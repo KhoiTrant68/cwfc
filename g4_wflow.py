@@ -153,7 +153,29 @@ def sample_wflow(net, y, n_steps=20, x0=None):
 
 
 @torch.no_grad()
-def evaluate(net, ae, data, X, Y, E, N, n_steps, n_draws, seed, device):
+def conditional_mmd(X, E, idx, draws, knn, seed, device):
+    """
+    CONDITIONAL realism: for each anchor condition y_hat_i, compare the generator's
+    draws at that FIXED condition against the real conditional set (the knn real
+    neighbours of y_hat_i in the code embedding), then average over anchors. Unlike
+    the marginal MMD (samples vs fresh random real), this measures whether each
+    p(x|y_hat) lands in the RIGHT fibre — the metric the aggregate objective (G1)
+    could not produce. Lower = samples match the local conditional better.
+    """
+    d = torch.cdist(E[idx], E)
+    d.scatter_(1, idx[:, None], float("inf"))
+    nn_idx = d.topk(knn, largest=False, dim=1).indices        # (N,knn)
+    N = idx.shape[0]
+    vals = []
+    for j in range(N):
+        gen = draws[:, j].flatten(1)                          # (n_draws,D) samples @ y_hat_j
+        real = X[nn_idx[j]].flatten(1)                        # (knn,D) real neighbours
+        vals.append(g1.mmd_rff(gen, real, seed=seed))
+    return float(np.mean(vals))
+
+
+@torch.no_grad()
+def evaluate(net, ae, data, X, Y, E, N, n_steps, n_draws, knn, seed, device):
     g1.set_seed(seed + 1)
     Np = X.shape[0]
     idx = torch.randint(0, Np, (N,), device=device)
@@ -169,8 +191,9 @@ def evaluate(net, ae, data, X, Y, E, N, n_steps, n_draws, seed, device):
     psnr_mmse = -10 * math.log10(mse_m) if mse_m > 0 else 99.0
     div = float(draws.flatten(2).var(dim=0).mean())    # Var_z[G(z,y_hat)]
     x_real = data.sample(N)
-    mmd = g1.mmd_rff(one.flatten(1), x_real.flatten(1), seed=seed)
-    return psnr_sample, psnr_mmse, mmd, div
+    mmd = g1.mmd_rff(one.flatten(1), x_real.flatten(1), seed=seed)   # marginal realism
+    cmmd = conditional_mmd(X, E, idx, draws, knn, seed, device)      # conditional realism
+    return psnr_sample, psnr_mmse, mmd, cmmd, div
 
 
 # ---------------------------------------------------------------------------
@@ -181,28 +204,46 @@ def evaluate(net, ae, data, X, Y, E, N, n_steps, n_draws, seed, device):
 def frontier_lambda(ae, data, embed, y_shape, lams, steps, N, npool, knn,
                     n_steps, n_draws, lr, device, seeds, ch=64):
     X, Y, E = build_pool(ae, data, embed, npool, device)
+    ns = len(seeds)
+    tag = f"mean±std over {ns} seeds" if ns > 1 else "seed " + str(seeds[0])
     print(f"\n=== G4 conditional-flow D-P frontier (knn={knn}, npool={npool}, "
-          f"ode_steps={n_steps}) — lam 0=perception .. 1=distortion(MMSE) ===")
-    print(f"{'lam':>6} {'PSNR_samp':>10} {'PSNR_mmse':>10} {'MMD':>12} {'Div(Var_z)':>12}")
+          f"ode_steps={n_steps}, {tag}) — lam 0=perception .. 1=distortion(MMSE) ===")
+    if ns > 1:
+        print(f"{'lam':>6} {'PSNR_samp':>16} {'PSNR_mmse':>16} {'MMD':>14} "
+              f"{'condMMD':>14} {'Div(Var_z)':>16}")
+    else:
+        print(f"{'lam':>6} {'PSNR_samp':>10} {'PSNR_mmse':>10} {'MMD':>12} "
+              f"{'condMMD':>12} {'Div(Var_z)':>12}")
     out = []
     for lam in lams:
-        ps, pm, md, dv = [], [], [], []
+        ps, pm, md, cm, dv = [], [], [], [], []
         for sd in seeds:
             g1.set_seed(sd)
             net = CondVelocity(zc=y_shape[0], ch=ch).to(device)
             train_wflow(net, X, Y, E, lam, steps, N, knn, lr, device)
-            a, b, c, d_ = evaluate(net, ae, data, X, Y, E, N, n_steps,
-                                   n_draws, sd, device)
-            ps.append(a); pm.append(b); md.append(c); dv.append(d_)
-        row = {"lam": lam, "psnr_sample": float(np.mean(ps)),
-               "psnr_mmse": float(np.mean(pm)), "mmd": float(np.mean(md)),
-               "div": float(np.mean(dv))}
+            a, b, c, cc, d_ = evaluate(net, ae, data, X, Y, E, N, n_steps,
+                                       n_draws, knn, sd, device)
+            ps.append(a); pm.append(b); md.append(c); cm.append(cc); dv.append(d_)
+        row = {"lam": lam,
+               "psnr_sample": float(np.mean(ps)), "psnr_sample_std": float(np.std(ps)),
+               "psnr_mmse": float(np.mean(pm)), "psnr_mmse_std": float(np.std(pm)),
+               "mmd": float(np.mean(md)), "mmd_std": float(np.std(md)),
+               "cond_mmd": float(np.mean(cm)), "cond_mmd_std": float(np.std(cm)),
+               "div": float(np.mean(dv)), "div_std": float(np.std(dv))}
         out.append(row)
-        print(f"{lam:>6.2f} {np.mean(ps):>10.2f} {np.mean(pm):>10.2f} "
-              f"{np.mean(md):>12.4e} {np.mean(dv):>12.4e}")
+        if ns > 1:
+            print(f"{lam:>6.2f} {np.mean(ps):>8.2f}±{np.std(ps):<6.2f} "
+                  f"{np.mean(pm):>8.2f}±{np.std(pm):<6.2f} "
+                  f"{np.mean(md):>10.3e} {np.mean(cm):>10.3e} "
+                  f"{np.mean(dv):>10.3e}±{np.std(dv):<.1e}")
+        else:
+            print(f"{lam:>6.2f} {np.mean(ps):>10.2f} {np.mean(pm):>10.2f} "
+                  f"{np.mean(md):>12.4e} {np.mean(cm):>12.4e} {np.mean(dv):>12.4e}")
     print("\nPASS iff: Div FALLS monotonically with lam (knob controls diversity — "
-          "the axis G1's eta could NOT move) AND PSNR_sample RISES with lam, while "
-          "MMD stays low. That is the conditional D-P frontier.")
+          "the axis G1's eta could NOT move) AND PSNR_sample RISES with lam. condMMD "
+          "(realism WITHIN the y_hat fibre) should be LOW at small lam (posterior "
+          "sampling lands in the right conditional) and rise toward the MMSE endpoint. "
+          "That is the conditional D-P frontier.")
     return out
 
 
