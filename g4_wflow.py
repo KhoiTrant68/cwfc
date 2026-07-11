@@ -197,13 +197,64 @@ def evaluate(net, ae, data, X, Y, E, N, n_steps, n_draws, knn, seed, device):
 
 
 # ---------------------------------------------------------------------------
+# Qualitative process visualisation: a fixed set of conditions, several draws
+# each, at a given lam. Across lam the SAME conditions are shown, so the eye
+# sees the draws spread out at lam=0 (posterior sampling) and collapse onto the
+# MMSE mean at lam=1 — the diversity axis, made visible. Optional (needs
+# matplotlib); never touched by the metric path.
+# ---------------------------------------------------------------------------
+
+
+@torch.no_grad()
+def save_sample_grid(net, ae, X, Y, lam, path, n_rows=6, n_draws=5,
+                     n_steps=20, device="cpu"):
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ImportError:
+        print("[save_samples] matplotlib not installed — skipping grid"); return
+    g = torch.Generator(device="cpu").manual_seed(12345)          # fixed rows
+    idx = torch.randperm(X.shape[0], generator=g)[:n_rows].to(device)
+    y_hat = Y[idx]
+    x_true = X[idx]
+    ae_dec = ae.decode(y_hat).clamp(0, 1)                          # AE recon of ŷ
+    draws = [sample_wflow(net, y_hat, n_steps) for _ in range(n_draws)]
+    mmse = torch.stack(draws).mean(0)
+
+    cols = [("x_true", x_true), ("AE(ŷ)", ae_dec)]
+    cols += [(f"draw {i+1}", draws[i]) for i in range(n_draws)]
+    cols += [("MMSE", mmse)]
+    ncol = len(cols)
+    fig, axes = plt.subplots(n_rows, ncol, figsize=(1.4 * ncol, 1.4 * n_rows))
+    axes = axes.reshape(n_rows, ncol)
+    for r in range(n_rows):
+        for c, (title, batch) in enumerate(cols):
+            ax = axes[r, c]
+            img = batch[r].permute(1, 2, 0).clamp(0, 1).cpu().numpy()
+            ax.imshow(img)
+            ax.set_xticks([]); ax.set_yticks([])
+            if r == 0:
+                ax.set_title(title, fontsize=8)
+    fig.suptitle(f"G4 samples at fixed ŷ — λ={lam:g} "
+                 f"({'perception' if lam == 0 else 'MMSE' if lam == 1 else 'mid'})",
+                 fontweight="bold")
+    fig.tight_layout()
+    fig.savefig(path, dpi=130); plt.close(fig)
+    print(f"saved {path}")
+
+
+# ---------------------------------------------------------------------------
 # lam sweep = the conditional D-P frontier
 # ---------------------------------------------------------------------------
 
 
 def frontier_lambda(ae, data, embed, y_shape, lams, steps, N, npool, knn,
-                    n_steps, n_draws, lr, device, seeds, ch=64):
+                    n_steps, n_draws, lr, device, seeds, ch=64, save_dir=None):
     X, Y, E = build_pool(ae, data, embed, npool, device)
+    if save_dir:
+        import os
+        os.makedirs(save_dir, exist_ok=True)
     ns = len(seeds)
     tag = f"mean±std over {ns} seeds" if ns > 1 else "seed " + str(seeds[0])
     print(f"\n=== G4 conditional-flow D-P frontier (knn={knn}, npool={npool}, "
@@ -224,6 +275,11 @@ def frontier_lambda(ae, data, embed, y_shape, lams, steps, N, npool, knn,
             a, b, c, cc, d_ = evaluate(net, ae, data, X, Y, E, N, n_steps,
                                        n_draws, knn, sd, device)
             ps.append(a); pm.append(b); md.append(c); cm.append(cc); dv.append(d_)
+            if save_dir and sd == seeds[0]:        # qualitative grid, first seed
+                import os
+                save_sample_grid(net, ae, X, Y, lam,
+                                 os.path.join(save_dir, f"samples_lam{lam:g}.png"),
+                                 n_steps=n_steps, device=device)
         row = {"lam": lam,
                "psnr_sample": float(np.mean(ps)), "psnr_sample_std": float(np.std(ps)),
                "psnr_mmse": float(np.mean(pm)), "psnr_mmse_std": float(np.std(pm)),
@@ -280,6 +336,9 @@ def main():
     ap.add_argument("--device", type=str, default=None)
     ap.add_argument("--out", type=str, default=None)
     ap.add_argument("--smoke", action="store_true")
+    ap.add_argument("--save_samples", type=str, default=None,
+                    help="thu muc de luu luoi mau dinh tinh moi lam (can matplotlib). "
+                         "Tat mac dinh; khong anh huong metric.")
     args = ap.parse_args()
 
     if args.smoke:
@@ -306,7 +365,8 @@ def main():
     embed = g1.make_embed(args.embed, y_shape, device=device)
     results = frontier_lambda(ae, data, embed, y_shape, args.lams, args.steps,
                               args.N, args.npool, args.knn, args.n_steps,
-                              args.n_draws, args.lr, device, args.seeds, ch=args.ch)
+                              args.n_draws, args.lr, device, args.seeds, ch=args.ch,
+                              save_dir=args.save_samples)
 
     if args.out:
         import json

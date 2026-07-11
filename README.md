@@ -85,6 +85,24 @@ rise, with conditional-MMD low at the perception endpoint — the frontier η co
 not produce. Full numbers and the paper-ready paragraphs are in
 [`docs/RESULTS.md`](docs/RESULTS.md).
 
+## Visualisation
+
+`viz.py` turns the result JSONs into the argument figures (needs `matplotlib`;
+`pip install -e .[viz]`). It is pure post-processing — no run is repeated:
+
+```bash
+python viz.py --g1 results/g1_potential_full.json \
+              --g4 results/g4_full.json --out figs
+```
+
+produces `figs/g1_frontier.png` (flat in η — the negative), `figs/g4_frontier.png`
+(monotone in λ — the positive), and `figs/dp_plane.png` (the PSNR-vs-MMD contrast:
+G1's η cluster vs G4's λ frontier). Either `--g1`/`--g4` may be omitted.
+
+For the qualitative *process* view, `g4_wflow.py --save_samples figs` dumps a grid
+per λ (fixed ŷ, several draws + the MMSE mean) so the diversity collapse from λ=0
+to λ=1 is visible directly.
+
 ## Key knobs (shared idea)
 
 - **η / λ** — the distortion–perception knob. η mixes a condition cost into an

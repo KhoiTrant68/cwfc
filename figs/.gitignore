@@ -1,0 +1,5 @@
+# Figures are regenerated from results; ignore the images, keep the folder.
+*.png
+*.pdf
+*.svg
+!.gitignore

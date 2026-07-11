@@ -23,12 +23,14 @@ keywords = [
 dependencies = ["torch", "numpy"]
 
 [project.optional-dependencies]
+# viz.py + g4_wflow.py --save_samples (figures / qualitative sample grids)
+viz = ["matplotlib"]
 # derisk_mixture_entropy.py — real rANS coder + LIC backbone
 entropy = ["compressai", "torchvision", "pillow"]
 # derisk_dp.py "real" mode — Stable-Diffusion VAE + LPIPS
 dp = ["diffusers", "lpips", "torchvision", "pillow"]
 # everything
-all = ["compressai", "torchvision", "pillow", "diffusers", "lpips"]
+all = ["matplotlib", "compressai", "torchvision", "pillow", "diffusers", "lpips"]
 
 [project.urls]
 Repository = "https://github.com/KhoiTrant68/cwfc"

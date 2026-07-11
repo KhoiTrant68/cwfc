@@ -3,7 +3,7 @@
 DATA_ROOT ?= /kaggle/input/datasets/fedesoriano/cifar100
 PY ?= python
 
-.PHONY: help smoke selftest g1 g1-full g4 g4-full toy dp-sandbox
+.PHONY: help smoke selftest g1 g1-full g4 g4-full toy dp-sandbox figs
 
 help:
 	@echo "Targets:"
@@ -14,6 +14,7 @@ help:
 	@echo "  g1-full    G1 robustness: 3 embeds x 3 seeds"
 	@echo "  g4         G4 conditional-flow lambda frontier, seed 0"
 	@echo "  g4-full    G4 hardened: 3 seeds + conditional-MMD"
+	@echo "  figs       render frontier + D-P plane figures from results/ JSONs"
 
 smoke:
 	$(PY) g1_pilot.py --smoke
@@ -50,4 +51,9 @@ g4-full:
 	$(PY) g4_wflow.py --dataset cifar100 --data_root $(DATA_ROOT) \
 	  --H 32 --N 256 --npool 2000 --knn 16 --steps 1500 --ae_steps 3000 \
 	  --ae_zc 2 --ae_qscale 0.5 --n_steps 20 --n_draws 8 \
-	  --lams 0 0.25 0.5 0.75 1 --seeds 0 1 2 --embed pool --out results/g4_full.json
+	  --lams 0 0.25 0.5 0.75 1 --seeds 0 1 2 --embed pool --out results/g4_full.json \
+	  --save_samples figs
+
+figs:
+	$(PY) viz.py --g1 results/g1_potential_full.json \
+	  --g4 results/g4_full.json --out figs

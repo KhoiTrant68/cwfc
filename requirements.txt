@@ -3,6 +3,9 @@
 torch
 numpy
 
+# viz.py + g4_wflow.py --save_samples (figures from result JSONs / sample grids)
+matplotlib
+
 # derisk_mixture_entropy.py — real rANS coder + LIC backbone
 compressai
 pillow
