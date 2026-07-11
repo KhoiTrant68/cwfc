@@ -47,8 +47,12 @@ Synth reference (designed 2-mode residual) DID show η-ordering 8.2→2.8×10⁻
 as the *contrast* that proves the real-data flatness is about the natural conditional,
 not the objective's plumbing.
 
-TODO before final: robustness table from `g1_potential_full.json`
-(embeds raw/proj8/pool × seeds 0,1,2) to show the 50× lift + η-flatness are stable.
+Robustness confirmed (`g1_potential_full.json`, 3 embeds × 3 seeds × 4 eta, weak AE
+22.05 dB, mean Var_z): eta {0,0.3,3,30} → {2.54, 2.66, 2.74, 2.70}×10⁻⁵ (flat, and the
+tiny drift goes the WRONG way — up, not toward MMSE), PSNR flat 22.39→22.42 dB. raw ≈
+proj8 ≈ pool to 2 sig figs → the diversity axis is independent of the c_y embedding,
+exactly as predicted (eta acts only between-condition). The 50× off-floor lift + eta-flat
+pattern is stable across all embeddings and seeds.
 
 ## 2. G4 — W-Flow conditional-OT scope
 
