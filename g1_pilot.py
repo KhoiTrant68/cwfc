@@ -55,10 +55,10 @@ Datasets:
     synth : procedurally generated small images with a KNOWN residual mode the
             coarse quantized condition cannot resolve -> a genuine D-P frontier,
             zero downloads. This is the smoke/sanity dataset.
-    cifar : torchvision CIFAR-10. KHONG tu download nua — mac dinh doc data da
-            tai san o --data_root (dung download_cifar.py hoac Kaggle dataset).
-            Them co --download neu van muon torchvision tu tai.
-    cifar100 : doc truc tiep pickle 'train' (Kaggle fedesoriano/cifar100).
+    cifar : torchvision CIFAR-10. NO auto-download by default — reads data already
+            present at --data_root (use download_cifar.py or a Kaggle dataset).
+            Add --download if you still want torchvision to fetch it.
+    cifar100 : reads the pickle 'train' directly (Kaggle fedesoriano/cifar100).
 
 Runs on CPU. Use --smoke for a fast end-to-end check.
 """
@@ -193,7 +193,7 @@ class SynthImages:
 
 
 class _Wrap:
-    """Bọc một pool ảnh cố định (N,3,H,W) thành dataset có .sample(n)."""
+    """Wrap a fixed image pool (N,3,H,W) as a dataset with .sample(n)."""
 
     def __init__(self, pool):
         self.pool = pool
@@ -205,12 +205,13 @@ class _Wrap:
 
 def _load_cifar100_images(root, max_n=5000):
     """
-    Đọc ảnh CIFAR-100 trực tiếp từ file pickle 'train' (bản python gốc của
-    Krizhevsky — đúng format các Kaggle dataset như fedesoriano/cifar100).
-    Tìm đệ quy file tên 'train' dưới root nên trỏ --data_root thẳng vào
-    /kaggle/input/... là được, không cần copy. Nhãn bị bỏ qua (thí nghiệm
-    chỉ cần ảnh). Nếu chỉ có tar.gz thì giải nén tạm ra ./data rồi đọc.
-    Trả về tensor float (N,3,32,32) trong [0,1].
+    Read CIFAR-100 images directly from the pickle 'train' file (Krizhevsky's
+    original python version — the format Kaggle datasets like fedesoriano/cifar100
+    use). It searches recursively for a file named 'train' under root, so pointing
+    --data_root straight at /kaggle/input/... works without copying. Labels are
+    ignored (the experiment only needs images). If only a tar.gz is present, it is
+    extracted to ./data and read from there.
+    Returns a float tensor (N,3,32,32) in [0,1].
     """
     import os
     import pickle
@@ -222,7 +223,7 @@ def _load_cifar100_images(root, max_n=5000):
             train_path = os.path.join(dirpath, "train")
             break
     if train_path is None:
-        # có thể dataset chỉ chứa cifar-100-python.tar.gz -> giải nén ra chỗ ghi được
+        # the dataset may only contain cifar-100-python.tar.gz -> extract to a writable dir
         tar = None
         for dirpath, _, files in os.walk(root):
             for fn in files:
@@ -234,8 +235,8 @@ def _load_cifar100_images(root, max_n=5000):
                 t.extractall("./data")
             return _load_cifar100_images("./data", max_n)
         raise FileNotFoundError(
-            f"Khong tim thay file pickle 'train' (hoac .tar.gz) duoi {root}. "
-            f"Kiem tra lai duong dan --data_root.")
+            f"No pickle 'train' (or .tar.gz) found under {root}. "
+            f"Check the --data_root path.")
 
     with open(train_path, "rb") as f:
         d = pickle.load(f, encoding="bytes")
@@ -254,11 +255,11 @@ def make_dataset(name, H, seed, device, root="./data", download=False):
         if not download and not os.path.isdir(
                 os.path.join(root, "cifar-10-batches-py")):
             raise FileNotFoundError(
-                f"Khong tim thay {root}/cifar-10-batches-py.\n"
-                f"Hay tai truoc bang:  python download_cifar.py --root {root}\n"
-                f"hoac tren Kaggle: add dataset CIFAR-10 python roi giai nen "
-                f"tar.gz vao {root}/ (xem huong dan), "
-                f"hoac chay lai voi --download neu muon torchvision tu tai.")
+                f"{root}/cifar-10-batches-py not found.\n"
+                f"Download it first:  python download_cifar.py --root {root}\n"
+                f"or on Kaggle: add the CIFAR-10 python dataset and extract the "
+                f"tar.gz into {root}/, "
+                f"or re-run with --download to let torchvision fetch it.")
         tf = transforms.Compose([transforms.Resize(H), transforms.ToTensor()])
         ds = datasets.CIFAR10(root=root, train=True, download=download,
                               transform=tf)
@@ -565,9 +566,9 @@ def frontier(ae, data, embeds, etas, y_shape, steps, N, eps, lr, device, seeds,
 
 
 # ---------------------------------------------------------------------------
-# Multi-GPU: cac lan train (embedding, eta, seed) doc lap hoan toan ->
-# chia job round-robin cho tung GPU, moi GPU mot process rieng (spawn).
-# KHONG dung DataParallel: model qua nho, chia job la cach song song dung.
+# Multi-GPU: the (embedding, eta, seed) training runs are fully independent ->
+# split jobs round-robin across GPUs, one process per GPU (spawn).
+# NOT DataParallel: the model is tiny, so splitting jobs is the right parallelism.
 # ---------------------------------------------------------------------------
 
 
@@ -581,7 +582,7 @@ def _rebuild_data(data_spec, device):
 
 
 def _gpu_worker(dev, jobs, ae_state, data_spec, cfg, out_q):
-    """Chay trong process con: dung lai AE + data tren GPU cua minh roi train."""
+    """Runs in a child process: rebuild AE + data on this GPU, then train."""
     try:
         data = _rebuild_data(data_spec, dev)
         ae = TinyAE(zc=cfg["ae_zc"], qscale=cfg["ae_qscale"]).to(dev)
@@ -616,7 +617,7 @@ def frontier_parallel(ae, data, embeds, etas, y_shape, steps, N, eps, lr,
     jobs = [(name, kind, eta, sd)
             for name, kind in embeds for eta in etas for sd in seeds]
     chunks = [jobs[i::len(devices)] for i in range(len(devices))]
-    print(f"\n=== Q2 frontier SONG SONG tren {devices} — {len(jobs)} job "
+    print(f"\n=== Q2 frontier PARALLEL on {devices} — {len(jobs)} jobs "
           f"(steps={steps}, N={N}, K={K}, loss={loss_kind}) ===")
 
     ctx = mp.get_context("spawn")
@@ -634,7 +635,7 @@ def frontier_parallel(ae, data, embeds, etas, y_shape, steps, N, eps, lr,
         if msg[0] == "err":
             for p in procs:
                 p.terminate()
-            raise RuntimeError(f"worker {msg[2]} loi: {msg[1]}")
+            raise RuntimeError(f"worker {msg[2]} error: {msg[1]}")
         _, name, eta, sd, psnr, mmd, div, dev = msg
         res.setdefault((name, eta), []).append((psnr, mmd, div))
         print(f"  [{i+1:>3}/{len(jobs)}] {dev}  {name:>6} eta={eta:<7g} seed={sd} "
@@ -642,7 +643,7 @@ def frontier_parallel(ae, data, embeds, etas, y_shape, steps, N, eps, lr,
     for p in procs:
         p.join()
 
-    # gop ket qua ve dung format cua frontier()
+    # aggregate results back into frontier()'s format
     out = {}
     for name, _ in embeds:
         print(f"\n embedding = {name}")
@@ -671,26 +672,26 @@ def main():
     ap.add_argument("--dataset", choices=["synth", "cifar", "cifar100"],
                     default="synth")
     ap.add_argument("--data_root", type=str, default="./data",
-                    help="thu muc chua cifar-10-batches-py (data tai san)")
+                    help="directory holding cifar-10-batches-py (pre-downloaded data)")
     ap.add_argument("--download", action="store_true",
-                    help="cho phep torchvision tu tai CIFAR-10 (mac dinh TAT; "
-                         "dung download_cifar.py de tai truoc)")
+                    help="let torchvision download CIFAR-10 (OFF by default; "
+                         "use download_cifar.py to fetch it first)")
     ap.add_argument("--mode", choices=["geom", "train", "both"], default="both")
     ap.add_argument("--H", type=int, default=16)
     ap.add_argument("--N", type=int, default=256)
     ap.add_argument("--steps", type=int, default=1500)
     ap.add_argument("--ae_steps", type=int, default=800)
     ap.add_argument("--ae_zc", type=int, default=4,
-                    help="so kenh latent cua AE. Nho hon => AE yeu hon => nhieu "
-                         "residual de tao frontier (thu 2 de ha AE recon).")
+                    help="AE latent channels. Smaller => weaker AE => more residual "
+                         "for a frontier (the 2nd lever to lower AE recon).")
     ap.add_argument("--ae_qscale", type=float, default=1.0,
-                    help="do min luong tu AE (buoc = 1/qscale). NHO hon => tho hon "
-                         "=> AE yeu hon. Dat ~0.5 de keo AE recon xuong ~18-20 dB.")
+                    help="AE quantization fineness (step = 1/qscale). SMALLER => coarser "
+                         "=> weaker AE. Set ~0.5 to pull AE recon down to ~18-20 dB.")
     ap.add_argument("--eps", type=float, default=0.05)
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--K", type=int, default=1,
-                    help="so mau z moi dieu kien. >1 ep da dang TRONG dieu kien "
-                         "(chi phi: batch sinh thanh N*K).")
+                    help="z draws per condition. >1 forces WITHIN-condition diversity "
+                         "(cost: the generated batch becomes N*K).")
     ap.add_argument("--seeds", type=int, nargs="+", default=[0, 1])
     ap.add_argument("--etas", type=float, nargs="+",
                     default=[0.0, 0.1, 0.3, 1.0, 3.0, 10.0, 100.0])
@@ -706,8 +707,8 @@ def main():
                     help="weight of the gen-gen debiasing term (raise if diversity "
                          "stays collapsed at full budget)")
     ap.add_argument("--devices", type=str, nargs="+", default=None,
-                    help="danh sach device de train song song, vd: cuda:0 cuda:1. "
-                         "Mac dinh: tu dong dung TAT CA GPU thay (hoac cpu).")
+                    help="devices to train on in parallel, e.g. cuda:0 cuda:1. "
+                         "Default: automatically use ALL visible GPUs (or cpu).")
     ap.add_argument("--out", type=str, default=None,
                     help="path to save results JSON (e.g. g1_result.json)")
     ap.add_argument("--smoke", action="store_true",
@@ -725,7 +726,7 @@ def main():
         devices = [f"cuda:{i}" for i in range(torch.cuda.device_count())]
     else:
         devices = ["cpu"]
-    device = devices[0]          # AE + geom probe chay tren device dau tien
+    device = devices[0]          # AE + geom probe run on the first device
     print(f"devices={devices}  dataset={args.dataset}  H={args.H}  "
           f"embeds={args.embeds}  etas={args.etas}  K={args.K}  "
           f"ae_zc={args.ae_zc} ae_qscale={args.ae_qscale}")

@@ -317,19 +317,19 @@ def main():
     ap.add_argument("--H", type=int, default=32)
     ap.add_argument("--N", type=int, default=256)
     ap.add_argument("--npool", type=int, default=2000,
-                    help="so anh trong pool co dinh de lay kNN dieu kien")
+                    help="size of the fixed image pool used for conditional kNN")
     ap.add_argument("--knn", type=int, default=16,
-                    help="so lang gieng theo embedding y_hat = do rong cua p(x|y_hat)")
+                    help="neighbours in the y_hat embedding = width of p(x|y_hat)")
     ap.add_argument("--steps", type=int, default=1500)
     ap.add_argument("--ae_steps", type=int, default=3000)
     ap.add_argument("--ae_zc", type=int, default=2)
     ap.add_argument("--ae_qscale", type=float, default=0.5)
-    ap.add_argument("--n_steps", type=int, default=20, help="so buoc Euler khi lay mau")
-    ap.add_argument("--n_draws", type=int, default=8, help="so mau z de do Var_z")
+    ap.add_argument("--n_steps", type=int, default=20, help="Euler steps when sampling")
+    ap.add_argument("--n_draws", type=int, default=8, help="z draws used to measure Var_z")
     ap.add_argument("--ch", type=int, default=64)
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--embed", type=str, default="pool",
-                    help="embedding cua y_hat cho kNN dieu kien (pool/proj8/raw)")
+                    help="y_hat embedding for the conditional kNN (pool/proj8/raw)")
     ap.add_argument("--lams", type=float, nargs="+",
                     default=[0.0, 0.25, 0.5, 0.75, 1.0])
     ap.add_argument("--seeds", type=int, nargs="+", default=[0])
@@ -337,8 +337,8 @@ def main():
     ap.add_argument("--out", type=str, default=None)
     ap.add_argument("--smoke", action="store_true")
     ap.add_argument("--save_samples", type=str, default=None,
-                    help="thu muc de luu luoi mau dinh tinh moi lam (can matplotlib). "
-                         "Tat mac dinh; khong anh huong metric.")
+                    help="directory to save a qualitative sample grid per lam "
+                         "(needs matplotlib). Off by default; does not affect metrics.")
     args = ap.parse_args()
 
     if args.smoke:
