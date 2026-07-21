@@ -41,6 +41,7 @@ Reuses g1_pilot for AE / data / embeddings / MMD, so it inherits --dataset
 
 Runs on a single GPU (one flow model per lam); sweep lam sequentially.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -52,7 +53,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 import g1_pilot as g1
-
 
 # ---------------------------------------------------------------------------
 # Conditional velocity field  v(x_t, t, y_hat) -> velocity  (same-resolution CNN)
@@ -71,17 +71,21 @@ class CondVelocity(nn.Module):
         super().__init__()
         cin = 3 + zc + 1
         self.net = nn.Sequential(
-            nn.Conv2d(cin, ch, 3, 1, 1), nn.GELU(),
-            nn.Conv2d(ch, ch, 3, 1, 1), nn.GELU(),
-            nn.Conv2d(ch, ch, 3, 1, 1), nn.GELU(),
-            nn.Conv2d(ch, ch, 3, 1, 1), nn.GELU(),
+            nn.Conv2d(cin, ch, 3, 1, 1),
+            nn.GELU(),
+            nn.Conv2d(ch, ch, 3, 1, 1),
+            nn.GELU(),
+            nn.Conv2d(ch, ch, 3, 1, 1),
+            nn.GELU(),
+            nn.Conv2d(ch, ch, 3, 1, 1),
+            nn.GELU(),
             nn.Conv2d(ch, 3, 3, 1, 1),
         )
 
     def forward(self, x, t, y):
         H = x.shape[-1]
-        yup = F.interpolate(y, size=(H, H), mode="nearest")      # (B,zc,H,W)
-        tch = t.expand(x.shape[0], 1, H, H)                       # (B,1,H,W)
+        yup = F.interpolate(y, size=(H, H), mode="nearest")  # (B,zc,H,W)
+        tch = t.expand(x.shape[0], 1, H, H)  # (B,1,H,W)
         return self.net(torch.cat([x, yup, tch], dim=1))
 
 
@@ -93,9 +97,9 @@ class CondVelocity(nn.Module):
 def build_pool(ae, data, embed, npool, device):
     """Sample a fixed pool of real images, encode to y_hat, embed for kNN."""
     with torch.no_grad():
-        X = data.sample(npool)                        # (Np,3,H,W)
-        Y = ae.condition(X)                           # (Np,zc,h,w)
-        E = embed(Y)                                  # (Np,d)
+        X = data.sample(npool)  # (Np,3,H,W)
+        Y = ae.condition(X)  # (Np,zc,h,w)
+        E = embed(Y)  # (Np,d)
     return X, Y, E
 
 
@@ -110,15 +114,15 @@ def train_wflow(net, X, Y, E, lam, steps, N, knn, lr, device):
     Np = X.shape[0]
     for _ in range(steps):
         idx = torch.randint(0, Np, (N,), device=device)
-        ya = Y[idx]                                   # anchor condition (N,zc,h,w)
+        ya = Y[idx]  # anchor condition (N,zc,h,w)
         with torch.no_grad():
-            d = torch.cdist(E[idx], E)                # (N,Np) code-embedding dist
-            d.scatter_(1, idx[:, None], float("inf")) # exclude self
-            nn_idx = d.topk(knn, largest=False, dim=1).indices   # (N,knn)
-            Xnb = X[nn_idx]                           # (N,knn,3,H,W) real neighbours
+            d = torch.cdist(E[idx], E)  # (N,Np) code-embedding dist
+            d.scatter_(1, idx[:, None], float("inf"))  # exclude self
+            nn_idx = d.topk(knn, largest=False, dim=1).indices  # (N,knn)
+            Xnb = X[nn_idx]  # (N,knn,3,H,W) real neighbours
             pick = torch.randint(0, knn, (N,), device=device)
-            x_samp = Xnb[torch.arange(N, device=device), pick]   # random neighbour
-            x_mean = Xnb.mean(dim=1)                  # neighbourhood MMSE point
+            x_samp = Xnb[torch.arange(N, device=device), pick]  # random neighbour
+            x_mean = Xnb.mean(dim=1)  # neighbourhood MMSE point
             # knob: lam=0 -> sample posterior (perception); lam=1 -> mean (distortion)
             x1 = (1.0 - lam) * x_samp + lam * x_mean
             x0 = torch.randn_like(x1)
@@ -127,7 +131,9 @@ def train_wflow(net, X, Y, E, lam, steps, N, knn, lr, device):
             target = x1 - x0
         v = net(xt, t, ya)
         loss = F.mse_loss(v, target)
-        opt.zero_grad(); loss.backward(); opt.step()
+        opt.zero_grad()
+        loss.backward()
+        opt.step()
     net.eval()
     return float(loss.detach())
 
@@ -136,7 +142,7 @@ def train_wflow(net, X, Y, E, lam, steps, N, knn, lr, device):
 def sample_wflow(net, y, n_steps=20, x0=None):
     """Integrate dx/dt = v(x,t,y) from t=0..1 with Euler. y:(B,zc,h,w)."""
     B, _, h, w = y.shape
-    H = h * 4                                          # AE downsamples 4x
+    H = h * 4  # AE downsamples 4x
     if x0 is None:
         x0 = torch.randn(B, 3, H, H, device=y.device)
     x = x0
@@ -164,12 +170,12 @@ def conditional_mmd(X, E, idx, draws, knn, seed, device):
     """
     d = torch.cdist(E[idx], E)
     d.scatter_(1, idx[:, None], float("inf"))
-    nn_idx = d.topk(knn, largest=False, dim=1).indices        # (N,knn)
+    nn_idx = d.topk(knn, largest=False, dim=1).indices  # (N,knn)
     N = idx.shape[0]
     vals = []
     for j in range(N):
-        gen = draws[:, j].flatten(1)                          # (n_draws,D) samples @ y_hat_j
-        real = X[nn_idx[j]].flatten(1)                        # (knn,D) real neighbours
+        gen = draws[:, j].flatten(1)  # (n_draws,D) samples @ y_hat_j
+        real = X[nn_idx[j]].flatten(1)  # (knn,D) real neighbours
         vals.append(g1.mmd_rff(gen, real, seed=seed))
     return float(np.mean(vals))
 
@@ -183,16 +189,16 @@ def evaluate(net, ae, data, X, Y, E, N, n_steps, n_draws, knn, seed, device):
     x_true = X[idx]
     # n_draws stochastic samples at FIXED condition
     draws = torch.stack([sample_wflow(net, y_hat, n_steps) for _ in range(n_draws)])
-    one = draws[0]                                     # a single coded sample
-    mmse = draws.mean(dim=0)                           # the MMSE estimate
+    one = draws[0]  # a single coded sample
+    mmse = draws.mean(dim=0)  # the MMSE estimate
     mse_s = float((one - x_true).pow(2).mean())
     mse_m = float((mmse - x_true).pow(2).mean())
     psnr_sample = -10 * math.log10(mse_s) if mse_s > 0 else 99.0
     psnr_mmse = -10 * math.log10(mse_m) if mse_m > 0 else 99.0
-    div = float(draws.flatten(2).var(dim=0).mean())    # Var_z[G(z,y_hat)]
+    div = float(draws.flatten(2).var(dim=0).mean())  # Var_z[G(z,y_hat)]
     x_real = data.sample(N)
-    mmd = g1.mmd_rff(one.flatten(1), x_real.flatten(1), seed=seed)   # marginal realism
-    cmmd = conditional_mmd(X, E, idx, draws, knn, seed, device)      # conditional realism
+    mmd = g1.mmd_rff(one.flatten(1), x_real.flatten(1), seed=seed)  # marginal realism
+    cmmd = conditional_mmd(X, E, idx, draws, knn, seed, device)  # conditional realism
     return psnr_sample, psnr_mmse, mmd, cmmd, div
 
 
@@ -206,19 +212,22 @@ def evaluate(net, ae, data, X, Y, E, N, n_steps, n_draws, knn, seed, device):
 
 
 @torch.no_grad()
-def save_sample_grid(net, ae, X, Y, lam, path, n_rows=6, n_draws=5,
-                     n_steps=20, device="cpu"):
+def save_sample_grid(
+    net, ae, X, Y, lam, path, n_rows=6, n_draws=5, n_steps=20, device="cpu"
+):
     try:
         import matplotlib
+
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
     except ImportError:
-        print("[save_samples] matplotlib not installed — skipping grid"); return
-    g = torch.Generator(device="cpu").manual_seed(12345)          # fixed rows
+        print("[save_samples] matplotlib not installed — skipping grid")
+        return
+    g = torch.Generator(device="cpu").manual_seed(12345)  # fixed rows
     idx = torch.randperm(X.shape[0], generator=g)[:n_rows].to(device)
     y_hat = Y[idx]
     x_true = X[idx]
-    ae_dec = ae.decode(y_hat).clamp(0, 1)                          # AE recon of ŷ
+    ae_dec = ae.decode(y_hat).clamp(0, 1)  # AE recon of ŷ
     draws = [sample_wflow(net, y_hat, n_steps) for _ in range(n_draws)]
     mmse = torch.stack(draws).mean(0)
 
@@ -233,14 +242,18 @@ def save_sample_grid(net, ae, X, Y, lam, path, n_rows=6, n_draws=5,
             ax = axes[r, c]
             img = batch[r].permute(1, 2, 0).clamp(0, 1).cpu().numpy()
             ax.imshow(img)
-            ax.set_xticks([]); ax.set_yticks([])
+            ax.set_xticks([])
+            ax.set_yticks([])
             if r == 0:
                 ax.set_title(title, fontsize=8)
-    fig.suptitle(f"G4 samples at fixed ŷ — λ={lam:g} "
-                 f"({'perception' if lam == 0 else 'MMSE' if lam == 1 else 'mid'})",
-                 fontweight="bold")
+    fig.suptitle(
+        f"G4 samples at fixed ŷ — λ={lam:g} "
+        f"({'perception' if lam == 0 else 'MMSE' if lam == 1 else 'mid'})",
+        fontweight="bold",
+    )
     fig.tight_layout()
-    fig.savefig(path, dpi=130); plt.close(fig)
+    fig.savefig(path, dpi=130)
+    plt.close(fig)
     print(f"saved {path}")
 
 
@@ -249,22 +262,45 @@ def save_sample_grid(net, ae, X, Y, lam, path, n_rows=6, n_draws=5,
 # ---------------------------------------------------------------------------
 
 
-def frontier_lambda(ae, data, embed, y_shape, lams, steps, N, npool, knn,
-                    n_steps, n_draws, lr, device, seeds, ch=64, save_dir=None):
+def frontier_lambda(
+    ae,
+    data,
+    embed,
+    y_shape,
+    lams,
+    steps,
+    N,
+    npool,
+    knn,
+    n_steps,
+    n_draws,
+    lr,
+    device,
+    seeds,
+    ch=64,
+    save_dir=None,
+):
     X, Y, E = build_pool(ae, data, embed, npool, device)
     if save_dir:
         import os
+
         os.makedirs(save_dir, exist_ok=True)
     ns = len(seeds)
     tag = f"mean±std over {ns} seeds" if ns > 1 else "seed " + str(seeds[0])
-    print(f"\n=== G4 conditional-flow D-P frontier (knn={knn}, npool={npool}, "
-          f"ode_steps={n_steps}, {tag}) — lam 0=perception .. 1=distortion(MMSE) ===")
+    print(
+        f"\n=== G4 conditional-flow D-P frontier (knn={knn}, npool={npool}, "
+        f"ode_steps={n_steps}, {tag}) — lam 0=perception .. 1=distortion(MMSE) ==="
+    )
     if ns > 1:
-        print(f"{'lam':>6} {'PSNR_samp':>16} {'PSNR_mmse':>16} {'MMD':>14} "
-              f"{'condMMD':>14} {'Div(Var_z)':>16}")
+        print(
+            f"{'lam':>6} {'PSNR_samp':>16} {'PSNR_mmse':>16} {'MMD':>14} "
+            f"{'condMMD':>14} {'Div(Var_z)':>16}"
+        )
     else:
-        print(f"{'lam':>6} {'PSNR_samp':>10} {'PSNR_mmse':>10} {'MMD':>12} "
-              f"{'condMMD':>12} {'Div(Var_z)':>12}")
+        print(
+            f"{'lam':>6} {'PSNR_samp':>10} {'PSNR_mmse':>10} {'MMD':>12} "
+            f"{'condMMD':>12} {'Div(Var_z)':>12}"
+        )
     out = []
     for lam in lams:
         ps, pm, md, cm, dv = [], [], [], [], []
@@ -272,34 +308,60 @@ def frontier_lambda(ae, data, embed, y_shape, lams, steps, N, npool, knn,
             g1.set_seed(sd)
             net = CondVelocity(zc=y_shape[0], ch=ch).to(device)
             train_wflow(net, X, Y, E, lam, steps, N, knn, lr, device)
-            a, b, c, cc, d_ = evaluate(net, ae, data, X, Y, E, N, n_steps,
-                                       n_draws, knn, sd, device)
-            ps.append(a); pm.append(b); md.append(c); cm.append(cc); dv.append(d_)
-            if save_dir and sd == seeds[0]:        # qualitative grid, first seed
+            a, b, c, cc, d_ = evaluate(
+                net, ae, data, X, Y, E, N, n_steps, n_draws, knn, sd, device
+            )
+            ps.append(a)
+            pm.append(b)
+            md.append(c)
+            cm.append(cc)
+            dv.append(d_)
+            if save_dir and sd == seeds[0]:  # qualitative grid, first seed
                 import os
-                save_sample_grid(net, ae, X, Y, lam,
-                                 os.path.join(save_dir, f"samples_lam{lam:g}.png"),
-                                 n_steps=n_steps, device=device)
-        row = {"lam": lam,
-               "psnr_sample": float(np.mean(ps)), "psnr_sample_std": float(np.std(ps)),
-               "psnr_mmse": float(np.mean(pm)), "psnr_mmse_std": float(np.std(pm)),
-               "mmd": float(np.mean(md)), "mmd_std": float(np.std(md)),
-               "cond_mmd": float(np.mean(cm)), "cond_mmd_std": float(np.std(cm)),
-               "div": float(np.mean(dv)), "div_std": float(np.std(dv))}
+
+                save_sample_grid(
+                    net,
+                    ae,
+                    X,
+                    Y,
+                    lam,
+                    os.path.join(save_dir, f"samples_lam{lam:g}.png"),
+                    n_steps=n_steps,
+                    device=device,
+                )
+        row = {
+            "lam": lam,
+            "psnr_sample": float(np.mean(ps)),
+            "psnr_sample_std": float(np.std(ps)),
+            "psnr_mmse": float(np.mean(pm)),
+            "psnr_mmse_std": float(np.std(pm)),
+            "mmd": float(np.mean(md)),
+            "mmd_std": float(np.std(md)),
+            "cond_mmd": float(np.mean(cm)),
+            "cond_mmd_std": float(np.std(cm)),
+            "div": float(np.mean(dv)),
+            "div_std": float(np.std(dv)),
+        }
         out.append(row)
         if ns > 1:
-            print(f"{lam:>6.2f} {np.mean(ps):>8.2f}±{np.std(ps):<6.2f} "
-                  f"{np.mean(pm):>8.2f}±{np.std(pm):<6.2f} "
-                  f"{np.mean(md):>10.3e} {np.mean(cm):>10.3e} "
-                  f"{np.mean(dv):>10.3e}±{np.std(dv):<.1e}")
+            print(
+                f"{lam:>6.2f} {np.mean(ps):>8.2f}±{np.std(ps):<6.2f} "
+                f"{np.mean(pm):>8.2f}±{np.std(pm):<6.2f} "
+                f"{np.mean(md):>10.3e} {np.mean(cm):>10.3e} "
+                f"{np.mean(dv):>10.3e}±{np.std(dv):<.1e}"
+            )
         else:
-            print(f"{lam:>6.2f} {np.mean(ps):>10.2f} {np.mean(pm):>10.2f} "
-                  f"{np.mean(md):>12.4e} {np.mean(cm):>12.4e} {np.mean(dv):>12.4e}")
-    print("\nPASS iff: Div FALLS monotonically with lam (knob controls diversity — "
-          "the axis G1's eta could NOT move) AND PSNR_sample RISES with lam. condMMD "
-          "(realism WITHIN the y_hat fibre) should be LOW at small lam (posterior "
-          "sampling lands in the right conditional) and rise toward the MMSE endpoint. "
-          "That is the conditional D-P frontier.")
+            print(
+                f"{lam:>6.2f} {np.mean(ps):>10.2f} {np.mean(pm):>10.2f} "
+                f"{np.mean(md):>12.4e} {np.mean(cm):>12.4e} {np.mean(dv):>12.4e}"
+            )
+    print(
+        "\nPASS iff: Div FALLS monotonically with lam (knob controls diversity — "
+        "the axis G1's eta could NOT move) AND PSNR_sample RISES with lam. condMMD "
+        "(realism WITHIN the y_hat fibre) should be LOW at small lam (posterior "
+        "sampling lands in the right conditional) and rise toward the MMSE endpoint. "
+        "That is the conditional D-P frontier."
+    )
     return out
 
 
@@ -310,35 +372,55 @@ def frontier_lambda(ae, data, embed, y_shape, lams, steps, N, npool, knn,
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--dataset", choices=["synth", "cifar", "cifar100"],
-                    default="synth")
+    ap.add_argument(
+        "--dataset", choices=["synth", "cifar", "cifar100"], default="synth"
+    )
     ap.add_argument("--data_root", type=str, default="./data")
     ap.add_argument("--download", action="store_true")
     ap.add_argument("--H", type=int, default=32)
     ap.add_argument("--N", type=int, default=256)
-    ap.add_argument("--npool", type=int, default=2000,
-                    help="size of the fixed image pool used for conditional kNN")
-    ap.add_argument("--knn", type=int, default=16,
-                    help="neighbours in the y_hat embedding = width of p(x|y_hat)")
+    ap.add_argument(
+        "--npool",
+        type=int,
+        default=2000,
+        help="size of the fixed image pool used for conditional kNN",
+    )
+    ap.add_argument(
+        "--knn",
+        type=int,
+        default=16,
+        help="neighbours in the y_hat embedding = width of p(x|y_hat)",
+    )
     ap.add_argument("--steps", type=int, default=1500)
     ap.add_argument("--ae_steps", type=int, default=3000)
     ap.add_argument("--ae_zc", type=int, default=2)
     ap.add_argument("--ae_qscale", type=float, default=0.5)
     ap.add_argument("--n_steps", type=int, default=20, help="Euler steps when sampling")
-    ap.add_argument("--n_draws", type=int, default=8, help="z draws used to measure Var_z")
+    ap.add_argument(
+        "--n_draws", type=int, default=8, help="z draws used to measure Var_z"
+    )
     ap.add_argument("--ch", type=int, default=64)
     ap.add_argument("--lr", type=float, default=1e-3)
-    ap.add_argument("--embed", type=str, default="pool",
-                    help="y_hat embedding for the conditional kNN (pool/proj8/raw)")
-    ap.add_argument("--lams", type=float, nargs="+",
-                    default=[0.0, 0.25, 0.5, 0.75, 1.0])
+    ap.add_argument(
+        "--embed",
+        type=str,
+        default="pool",
+        help="y_hat embedding for the conditional kNN (pool/proj8/raw)",
+    )
+    ap.add_argument(
+        "--lams", type=float, nargs="+", default=[0.0, 0.25, 0.5, 0.75, 1.0]
+    )
     ap.add_argument("--seeds", type=int, nargs="+", default=[0])
     ap.add_argument("--device", type=str, default=None)
     ap.add_argument("--out", type=str, default=None)
     ap.add_argument("--smoke", action="store_true")
-    ap.add_argument("--save_samples", type=str, default=None,
-                    help="directory to save a qualitative sample grid per lam "
-                         "(needs matplotlib). Off by default; does not affect metrics.")
+    ap.add_argument(
+        "--save_samples",
+        type=str,
+        default=None,
+        help="directory to save a qualitative sample grid per lam "
+        "(needs matplotlib). Off by default; does not affect metrics.",
+    )
     args = ap.parse_args()
 
     if args.smoke:
@@ -346,12 +428,20 @@ def main():
         args.lams, args.seeds = [0.0, 0.5, 1.0], [0]
 
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"device={device}  dataset={args.dataset}  H={args.H}  embed={args.embed}  "
-          f"lams={args.lams}  knn={args.knn}  ae_zc={args.ae_zc} ae_qscale={args.ae_qscale}")
+    print(
+        f"device={device}  dataset={args.dataset}  H={args.H}  embed={args.embed}  "
+        f"lams={args.lams}  knn={args.knn}  ae_zc={args.ae_zc} ae_qscale={args.ae_qscale}"
+    )
 
     g1.set_seed(0)
-    data = g1.make_dataset(args.dataset, args.H, seed=0, device=device,
-                           root=args.data_root, download=args.download)
+    data = g1.make_dataset(
+        args.dataset,
+        args.H,
+        seed=0,
+        device=device,
+        root=args.data_root,
+        download=args.download,
+    )
     ae = g1.TinyAE(zc=args.ae_zc, qscale=args.ae_qscale).to(device)
     rec = g1.train_ae(ae, data, steps=args.ae_steps, N=args.N, lr=1e-3, device=device)
     with torch.no_grad():
@@ -359,23 +449,58 @@ def main():
         y_hat = ae.condition(x)
         y_shape = tuple(y_hat.shape[1:])
         ae_psnr = -10 * math.log10(float((ae.decode(y_hat) - x).pow(2).mean()))
-    print(f"frozen AE: recon mse={rec:.4f}, quantized-recon PSNR={ae_psnr:.2f} dB, "
-          f"y_hat shape={y_shape}")
+    print(
+        f"frozen AE: recon mse={rec:.4f}, quantized-recon PSNR={ae_psnr:.2f} dB, "
+        f"y_hat shape={y_shape}"
+    )
 
     embed = g1.make_embed(args.embed, y_shape, device=device)
-    results = frontier_lambda(ae, data, embed, y_shape, args.lams, args.steps,
-                              args.N, args.npool, args.knn, args.n_steps,
-                              args.n_draws, args.lr, device, args.seeds, ch=args.ch,
-                              save_dir=args.save_samples)
+    results = frontier_lambda(
+        ae,
+        data,
+        embed,
+        y_shape,
+        args.lams,
+        args.steps,
+        args.N,
+        args.npool,
+        args.knn,
+        args.n_steps,
+        args.n_draws,
+        args.lr,
+        device,
+        args.seeds,
+        ch=args.ch,
+        save_dir=args.save_samples,
+    )
 
     if args.out:
         import json
-        payload = {"config": {k: getattr(args, k) for k in
-                              ["dataset", "H", "N", "npool", "knn", "steps",
-                               "ae_steps", "ae_zc", "ae_qscale", "n_steps",
-                               "n_draws", "embed", "lams", "seeds"]},
-                   "ae_recon_psnr": ae_psnr, "y_shape": list(y_shape),
-                   "frontier": results}
+
+        payload = {
+            "config": {
+                k: getattr(args, k)
+                for k in [
+                    "dataset",
+                    "H",
+                    "N",
+                    "npool",
+                    "knn",
+                    "steps",
+                    "ae_steps",
+                    "ae_zc",
+                    "ae_qscale",
+                    "n_steps",
+                    "n_draws",
+                    "embed",
+                    "lams",
+                    "seeds",
+                ]
+            },
+            "ae_recon_psnr": ae_psnr,
+            "y_shape": list(y_shape),
+            "frontier": results,
+        }
         with open(args.out, "w") as f:
             json.dump(payload, f, indent=2)
         print(f"\nsaved results -> {args.out}")

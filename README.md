@@ -29,6 +29,26 @@ sequence (full gate table in [`docs/ROADMAP.md`](docs/ROADMAP.md)):
 Supporting: [`docs/`](docs/) (results + roadmap), [`results/`](results/) (JSON
 outputs), `pyproject.toml`, `requirements.txt`, `Makefile`, `CITATION.cff`.
 
+### Real-image track (`real/`)
+
+The scripts above prove the G1/G4 mechanism at 32×32 CIFAR scale with a toy
+autoencoder and a proxy MMD metric. `real/` scales G4 (the positive result)
+to real photos, real bitrate, and a published baseline, on the same idea:
+
+| file | role |
+|---|---|
+| `real/codec.py` | frozen `compressai` codec (replaces `TinyAE`); real bpp via actual entropy coding |
+| `real/data.py` | Kodak/CLIC patch sampler + kNN conditional pool + a sanity-check tool for the conditional fibre |
+| `real/flow.py` | `UNetVelocity` (replaces `CondVelocity`), single λ-conditioned model, patch=256 |
+| `real/eval.py` | bpp/PSNR/MS-SSIM/LPIPS/FID on full Kodak/CLIC test images |
+| `real/baselines/run_msillm.py` | MS-ILLM (ICML 2023) pretrained baseline, same metric protocol as `real/eval.py` |
+| `real/viz_real.py` | CWFC λ-frontier vs. MS-ILLM on one bpp-matched D-P plane |
+| `real/data/get_kodak.sh`, `real/data/get_clic.sh` | dataset download helpers |
+
+Extra deps: `pip install -r real/requirements.txt`. See
+[`docs/RESULTS_REAL.md`](docs/RESULTS_REAL.md) for the full protocol and
+reproduce commands.
+
 ## Install
 
 ```bash

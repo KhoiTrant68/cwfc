@@ -40,6 +40,7 @@ Run on Kaggle
     # force sequential on a single GPU
     python derisk.py --data /kaggle/input/<your-image-folder> --ks 1 3 5 --parallel 0
 """
+
 from __future__ import annotations
 
 import argparse
@@ -55,14 +56,13 @@ import torch
 import torch.multiprocessing as mp
 import torch.nn as nn
 import torch.nn.functional as F
-from PIL import Image
-from torchvision import transforms
-from torch.utils.data import DataLoader, Dataset
-
+from compressai._CXX import pmf_to_quantized_cdf as _pmf_to_quantized_cdf
+from compressai.ans import BufferedRansEncoder, RansDecoder
 from compressai.entropy_models import EntropyBottleneck
 from compressai.layers import GDN
-from compressai.ans import BufferedRansEncoder, RansDecoder
-from compressai._CXX import pmf_to_quantized_cdf as _pmf_to_quantized_cdf
+from PIL import Image
+from torch.utils.data import DataLoader, Dataset
+from torchvision import transforms
 
 # ---------------------------------------------------------------------------
 # Repro
@@ -96,7 +96,7 @@ def ste_round(x):
 
 
 # Standardized Gaussian CDF via erfc (matches CompressAI numerics).
-_INV_SQRT2 = float(2 ** -0.5)
+_INV_SQRT2 = float(2**-0.5)
 
 
 def std_cdf(x):
@@ -188,19 +188,26 @@ class SmallLIC(nn.Module):
             conv(3, N), GDN(N), conv(N, N), GDN(N), conv(N, N), GDN(N), conv(N, M)
         )
         self.g_s = nn.Sequential(
-            deconv(M, N), GDN(N, inverse=True),
-            deconv(N, N), GDN(N, inverse=True),
-            deconv(N, N), GDN(N, inverse=True),
+            deconv(M, N),
+            GDN(N, inverse=True),
+            deconv(N, N),
+            GDN(N, inverse=True),
+            deconv(N, N),
+            GDN(N, inverse=True),
             deconv(N, 3),
         )
         self.h_a = nn.Sequential(
-            conv(M, N, 3, 1), nn.LeakyReLU(inplace=True),
-            conv(N, N), nn.LeakyReLU(inplace=True),
+            conv(M, N, 3, 1),
+            nn.LeakyReLU(inplace=True),
+            conv(N, N),
+            nn.LeakyReLU(inplace=True),
             conv(N, N),
         )
         self.h_s = nn.Sequential(
-            deconv(N, N), nn.LeakyReLU(inplace=True),
-            deconv(N, N), nn.LeakyReLU(inplace=True),
+            deconv(N, N),
+            nn.LeakyReLU(inplace=True),
+            deconv(N, N),
+            nn.LeakyReLU(inplace=True),
             conv(N, 2 * M, 3, 1),
         )
         self.entropy_bottleneck = EntropyBottleneck(N)
@@ -212,8 +219,10 @@ class SmallLIC(nn.Module):
             in_ch = 2 * M + i * self.slice_ch
             self.param_nets.append(
                 nn.Sequential(
-                    conv(in_ch, 224, 3, 1), nn.GELU(),
-                    conv(224, 128, 3, 1), nn.GELU(),
+                    conv(in_ch, 224, 3, 1),
+                    nn.GELU(),
+                    conv(224, 128, 3, 1),
+                    nn.GELU(),
                     conv(128, out_ch, 3, 1),
                 )
             )
@@ -297,7 +306,10 @@ def verify_real_coder(model, x, device, grid_cap=384, precision=16):
         mu_bar = model.cond.mixture_mean(w, m)
         resid = torch.round(ys - mu_bar).to(torch.long)
         y_hat_slices.append(resid.float() + mu_bar)
-        resids.append(resid); ws.append(w); ms.append(m); ss.append(s)
+        resids.append(resid)
+        ws.append(w)
+        ms.append(m)
+        ss.append(s)
 
     max_abs = int(max(int(r.abs().max()) for r in resids))
     grid_radius = min(max_abs + 1, grid_cap)
@@ -323,8 +335,11 @@ def verify_real_coder(model, x, device, grid_cap=384, precision=16):
         sidx = sym_idx.cpu().tolist()
         for j in range(pmf_np.shape[0]):
             q = _pmf_to_quantized_cdf(pmf_np[j].tolist(), precision)
-            cdfs.append(q); cdf_lengths.append(len(q)); offsets.append(0)
-            indexes.append(len(cdfs) - 1); symbols.append(int(sidx[j]))
+            cdfs.append(q)
+            cdf_lengths.append(len(q))
+            offsets.append(0)
+            indexes.append(len(cdfs) - 1)
+            symbols.append(int(sidx[j]))
 
     enc = BufferedRansEncoder()
     enc.encode_with_indexes(symbols, indexes, cdfs, cdf_lengths, offsets)
@@ -350,9 +365,12 @@ def verify_real_coder(model, x, device, grid_cap=384, precision=16):
 
 
 class PatchDataset(Dataset):
-    def __init__(self, root, patch=256, exts=(".png", ".jpg", ".jpeg", ".bmp", ".webp")):
+    def __init__(
+        self, root, patch=256, exts=(".png", ".jpg", ".jpeg", ".bmp", ".webp")
+    ):
         self.paths = [
-            p for p in glob.glob(os.path.join(root, "**", "*"), recursive=True)
+            p
+            for p in glob.glob(os.path.join(root, "**", "*"), recursive=True)
             if os.path.splitext(p)[1].lower() in exts
         ]
         if not self.paths:
@@ -391,8 +409,14 @@ def run_one(K, args, device):
     val_idx, tr_idx = perm[:n_val], perm[n_val:]
     tr = torch.utils.data.Subset(ds, tr_idx)
     va = torch.utils.data.Subset(ds, val_idx)
-    tl = DataLoader(tr, batch_size=args.bs, shuffle=True, num_workers=args.workers,
-                    drop_last=True, pin_memory=True)
+    tl = DataLoader(
+        tr,
+        batch_size=args.bs,
+        shuffle=True,
+        num_workers=args.workers,
+        drop_last=True,
+        pin_memory=True,
+    )
     vl = DataLoader(va, batch_size=args.bs, shuffle=False, num_workers=args.workers)
 
     main_p = [p for n, p in model.named_parameters() if not n.endswith(".quantiles")]
@@ -408,10 +432,11 @@ def run_one(K, args, device):
             if step >= args.steps:
                 break
             x = x.to(device)
-            opt.zero_grad(); aux_opt.zero_grad()
+            opt.zero_grad()
+            aux_opt.zero_grad()
             out = model(x)
             mse = F.mse_loss(out["x_hat"], x)
-            loss = args.lmbda * 255.0 ** 2 * mse + out["bpp"]
+            loss = args.lmbda * 255.0**2 * mse + out["bpp"]
             loss.backward()
             nn.utils.clip_grad_norm_(main_p, 1.0)
             opt.step()
@@ -420,9 +445,11 @@ def run_one(K, args, device):
             aux_opt.step()
             step += 1
             if step % args.log_every == 0:
-                print(f"[K={K}] step {step}/{args.steps} "
-                      f"loss {loss.item():.3f} bpp {out['bpp'].item():.4f} "
-                      f"mse {mse.item():.5f}")
+                print(
+                    f"[K={K}] step {step}/{args.steps} "
+                    f"loss {loss.item():.3f} bpp {out['bpp'].item():.4f} "
+                    f"mse {mse.item():.5f}"
+                )
 
     # eval
     model.eval()
@@ -434,8 +461,10 @@ def run_one(K, args, device):
             out = model(x)
             mse = F.mse_loss(out["x_hat"].clamp(0, 1), x).item()
             psnr = -10 * math.log10(mse) if mse > 0 else 99.0
-            bpps.append(out["bpp"].item()); ybpps.append(out["y_bpp"].item())
-            psnrs.append(psnr); wsum += out["weights"]
+            bpps.append(out["bpp"].item())
+            ybpps.append(out["y_bpp"].item())
+            psnrs.append(psnr)
+            wsum += out["weights"]
     w_mean = (wsum / len(vl)).cpu()
     H_used = float(-(w_mean.clamp(1e-9) * w_mean.clamp(1e-9).log2()).sum())
 
@@ -483,6 +512,7 @@ def _worker(gpu_id, k_queue, res_queue, args):
             res = run_one(K, args, device)
         except Exception as e:  # never let the parent hang on a crashed worker
             import traceback
+
             res = {"K": K, "error": f"{e}", "trace": traceback.format_exc()}
         res_queue.put(res)
 
@@ -508,10 +538,19 @@ def main():
     ap.add_argument("--seed", type=int, default=2026)
     ap.add_argument("--log_every", type=int, default=200)
     ap.add_argument("--verify_imgs", type=int, default=3)
-    ap.add_argument("--parallel", type=int, default=1,
-                    help="1 = run one K per GPU in parallel when >=2 GPUs; 0 = sequential")
-    ap.add_argument("--gpus", type=int, nargs="+", default=None,
-                    help="GPU ids to use (default: all visible)")
+    ap.add_argument(
+        "--parallel",
+        type=int,
+        default=1,
+        help="1 = run one K per GPU in parallel when >=2 GPUs; 0 = sequential",
+    )
+    ap.add_argument(
+        "--gpus",
+        type=int,
+        nargs="+",
+        default=None,
+        help="GPU ids to use (default: all visible)",
+    )
     args = ap.parse_args()
 
     n_gpu = torch.cuda.device_count()
@@ -520,14 +559,18 @@ def main():
 
     if use_parallel:
         n_workers = min(len(gpus), len(args.ks))
-        print(f"PARALLEL: {len(args.ks)} runs over {n_workers} GPUs {gpus[:n_workers]} "
-              f"(one K per GPU; λ={args.lmbda}, steps={args.steps})")
+        print(
+            f"PARALLEL: {len(args.ks)} runs over {n_workers} GPUs {gpus[:n_workers]} "
+            f"(one K per GPU; λ={args.lmbda}, steps={args.steps})"
+        )
         ctx = mp.get_context("spawn")
         kq, rq = ctx.Queue(), ctx.Queue()
         for K in args.ks:
             kq.put(K)
-        procs = [ctx.Process(target=_worker, args=(gpus[i], kq, rq, args))
-                 for i in range(n_workers)]
+        procs = [
+            ctx.Process(target=_worker, args=(gpus[i], kq, rq, args))
+            for i in range(n_workers)
+        ]
         for p in procs:
             p.start()
         results = [rq.get() for _ in args.ks]  # one result per K
@@ -547,11 +590,14 @@ def main():
             print(f"\n[!] K={r['K']} FAILED: {r['error']}\n{r.get('trace','')}")
     results = sorted([r for r in results if "error" not in r], key=lambda r: r["K"])
     if not results:
-        print("No successful runs."); return
+        print("No successful runs.")
+        return
 
     print("\n================ SUMMARY ================")
-    print(f"{'K':>3} {'val_bpp':>9} {'val_psnr':>9} {'H_used/maxH':>14} "
-          f"{'lossless':>9} {'real-est':>9} {'clamped':>8}")
+    print(
+        f"{'K':>3} {'val_bpp':>9} {'val_psnr':>9} {'H_used/maxH':>14} "
+        f"{'lossless':>9} {'real-est':>9} {'clamped':>8}"
+    )
     base = next((r for r in results if r["K"] == 1), results[0])
     for r in results:
         rc = r["real_check"]
@@ -564,11 +610,15 @@ def main():
             gap_s = "n/a"
         hus = f"{r['H_used_bits']:.2f}/{r['max_H_bits']:.2f}" if r["K"] > 1 else "-"
         d_bpp = (r["val_bpp"] - base["val_bpp"]) / base["val_bpp"] * 100
-        print(f"{r['K']:>3} {r['val_bpp']:>9.4f} {r['val_psnr']:>9.2f} {hus:>14} "
-              f"{str(loss_ok):>9} {gap_s:>9} {clamped:>8}   (Δbpp vs K=1: {d_bpp:+.1f}%)")
+        print(
+            f"{r['K']:>3} {r['val_bpp']:>9.4f} {r['val_psnr']:>9.2f} {hus:>14} "
+            f"{str(loss_ok):>9} {gap_s:>9} {clamped:>8}   (Δbpp vs K=1: {d_bpp:+.1f}%)"
+        )
 
     print("\nHow to read this:")
-    print(" * Δbpp vs K=1 NEGATIVE at similar PSNR  -> mixture helps. Hypothesis PASSES.")
+    print(
+        " * Δbpp vs K=1 NEGATIVE at similar PSNR  -> mixture helps. Hypothesis PASSES."
+    )
     print(" * Δbpp ~ 0                               -> conditional ~unimodal. PIVOT.")
     print(" * Mixture helps BUT H_used << max_H      -> dead modes / collapse:")
     print("     best case for the OT idea (marginal constraint is the fix).")

@@ -49,6 +49,7 @@ Run (real):
   python derisk_dp.py --data /path/to/images --backbone vae --percep lpips \
                       --delta 0.7 --n_t 9 --max_images 200
 """
+
 from __future__ import annotations
 
 import argparse
@@ -63,7 +64,6 @@ import torch.nn.functional as F
 from PIL import Image
 from torchvision import transforms
 
-
 # ---------------------------------------------------------------------------
 # Backbones: must expose encode(x)->z and decode(z)->x in [0,1] pixel space
 # ---------------------------------------------------------------------------
@@ -75,15 +75,21 @@ class ToyAE(nn.Module):
     def __init__(self, ch=64, zc=8):
         super().__init__()
         self.enc = nn.Sequential(
-            nn.Conv2d(3, ch, 4, 2, 1), nn.GELU(),
-            nn.Conv2d(ch, ch, 4, 2, 1), nn.GELU(),
-            nn.Conv2d(ch, ch, 4, 2, 1), nn.GELU(),
+            nn.Conv2d(3, ch, 4, 2, 1),
+            nn.GELU(),
+            nn.Conv2d(ch, ch, 4, 2, 1),
+            nn.GELU(),
+            nn.Conv2d(ch, ch, 4, 2, 1),
+            nn.GELU(),
             nn.Conv2d(ch, zc, 3, 1, 1),
         )
         self.dec = nn.Sequential(
-            nn.Conv2d(zc, ch, 3, 1, 1), nn.GELU(),
-            nn.ConvTranspose2d(ch, ch, 4, 2, 1), nn.GELU(),
-            nn.ConvTranspose2d(ch, ch, 4, 2, 1), nn.GELU(),
+            nn.Conv2d(zc, ch, 3, 1, 1),
+            nn.GELU(),
+            nn.ConvTranspose2d(ch, ch, 4, 2, 1),
+            nn.GELU(),
+            nn.ConvTranspose2d(ch, ch, 4, 2, 1),
+            nn.GELU(),
             nn.ConvTranspose2d(ch, 3, 4, 2, 1),
         )
 
@@ -100,6 +106,7 @@ class VAEBackbone(nn.Module):
     def __init__(self, name="stabilityai/sd-vae-ft-mse", device="cuda"):
         super().__init__()
         from diffusers import AutoencoderKL
+
         self.vae = AutoencoderKL.from_pretrained(name).to(device).eval()
         self.scale = 0.18215
         for p in self.vae.parameters():
@@ -134,6 +141,7 @@ class FeatPercep:
 class LPIPSPercep:
     def __init__(self, device, net="alex"):
         import lpips
+
         self.fn = lpips.LPIPS(net=net).to(device).eval()
 
     @torch.no_grad()
@@ -179,7 +187,7 @@ def traverse(backbone, x_star, x_zero, z_q, dither, t, kind):
 
 def psnr(a, b):
     mse = (a - b).pow(2).mean(dim=(1, 2, 3)).clamp(min=1e-12)
-    return (-10 * torch.log10(mse))
+    return -10 * torch.log10(mse)
 
 
 # ---------------------------------------------------------------------------
@@ -188,18 +196,25 @@ def psnr(a, b):
 
 
 class Imgs(torch.utils.data.Dataset):
-    def __init__(self, root, size=256, n=None,
-                 exts=(".png", ".jpg", ".jpeg", ".bmp", ".webp")):
-        self.paths = sorted(p for p in glob.glob(os.path.join(root, "**", "*"),
-                                                 recursive=True)
-                            if os.path.splitext(p)[1].lower() in exts)
+    def __init__(
+        self, root, size=256, n=None, exts=(".png", ".jpg", ".jpeg", ".bmp", ".webp")
+    ):
+        self.paths = sorted(
+            p
+            for p in glob.glob(os.path.join(root, "**", "*"), recursive=True)
+            if os.path.splitext(p)[1].lower() in exts
+        )
         if n:
             self.paths = self.paths[:n]
         if not self.paths:
             raise RuntimeError(f"No images under {root}")
-        self.t = transforms.Compose([
-            transforms.Resize(size), transforms.CenterCrop(size),
-            transforms.ToTensor()])
+        self.t = transforms.Compose(
+            [
+                transforms.Resize(size),
+                transforms.CenterCrop(size),
+                transforms.ToTensor(),
+            ]
+        )
 
     def __len__(self):
         return len(self.paths)
@@ -221,11 +236,13 @@ def quick_train_toy(ae, loader, device, steps=300):
         try:
             x = next(it)
         except StopIteration:
-            it = iter(loader); x = next(it)
+            it = iter(loader)
+            x = next(it)
         x = x.to(device)
         opt.zero_grad()
         loss = F.mse_loss(ae.decode(ae.encode(x)), x)
-        loss.backward(); opt.step()
+        loss.backward()
+        opt.step()
     ae.eval()
     return float(loss.detach())
 
@@ -240,7 +257,9 @@ def main():
     ap.add_argument("--data", required=True)
     ap.add_argument("--backbone", choices=["vae", "toy"], default="toy")
     ap.add_argument("--percep", choices=["lpips", "feat"], default="feat")
-    ap.add_argument("--delta", type=float, default=0.7, help="latent quant step (rate knob)")
+    ap.add_argument(
+        "--delta", type=float, default=0.7, help="latent quant step (rate knob)"
+    )
     ap.add_argument("--n_t", type=int, default=9, help="traversal points in [0,1]")
     ap.add_argument("--size", type=int, default=256)
     ap.add_argument("--bs", type=int, default=8)
@@ -251,22 +270,25 @@ def main():
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     ds = Imgs(args.data, size=args.size, n=args.max_images)
-    loader = torch.utils.data.DataLoader(ds, batch_size=args.bs, shuffle=False,
-                                         num_workers=2)
-    print(f"device={device} backbone={args.backbone} percep={args.percep} "
-          f"images={len(ds)} delta={args.delta}")
+    loader = torch.utils.data.DataLoader(
+        ds, batch_size=args.bs, shuffle=False, num_workers=2
+    )
+    print(
+        f"device={device} backbone={args.backbone} percep={args.percep} "
+        f"images={len(ds)} delta={args.delta}"
+    )
 
     if args.backbone == "vae":
         backbone = VAEBackbone(device=device)
     else:
         backbone = ToyAE().to(device)
-        tl = torch.utils.data.DataLoader(ds, batch_size=args.bs, shuffle=True,
-                                         num_workers=2)
+        tl = torch.utils.data.DataLoader(
+            ds, batch_size=args.bs, shuffle=True, num_workers=2
+        )
         rec = quick_train_toy(backbone, tl, device, steps=args.toy_steps)
         print(f"toy AE trained, recon mse={rec:.5f}")
 
-    percep = (LPIPSPercep(device) if args.percep == "lpips"
-              else FeatPercep(backbone))
+    percep = LPIPSPercep(device) if args.percep == "lpips" else FeatPercep(backbone)
 
     kinds = ["A_pixel_linear", "B_latent_linear", "C_manifold_proj"]
     ts = torch.linspace(0, 1, args.n_t)
@@ -281,18 +303,19 @@ def main():
             x_star, x_zero, z_q, dither = build_endpoints(backbone, x, args.delta)
             for k in kinds:
                 for ti, t in enumerate(ts):
-                    xt = traverse(backbone, x_star, x_zero, z_q, dither,
-                                  float(t), k)
+                    xt = traverse(backbone, x_star, x_zero, z_q, dither, float(t), k)
                     sp[k][ti] += psnr(xt, x).sum().cpu()
                     sl[k][ti] += percep(xt, x).sum().cpu()
             n += x.shape[0]
 
-    P = {k: (sp[k] / n).numpy() for k in kinds}   # PSNR(t)
-    L = {k: (sl[k] / n).numpy() for k in kinds}   # LPIPS(t)
+    P = {k: (sp[k] / n).numpy() for k in kinds}  # PSNR(t)
+    L = {k: (sl[k] / n).numpy() for k in kinds}  # LPIPS(t)
 
     # ---- report ----
-    print(f"\n(rate proxy: latent quant step delta={args.delta}; "
-          f"averaged over {n} images)")
+    print(
+        f"\n(rate proxy: latent quant step delta={args.delta}; "
+        f"averaged over {n} images)"
+    )
     print("\nPSNR(t) [dB] / perceptual(t) [lower=better]  along the traversal:")
     hdr = "  t   " + "".join(f"|{k[:14]:>16}" for k in kinds)
     print(hdr)
@@ -310,24 +333,37 @@ def main():
         return P[k][order], L[k][order]
 
     pa, la = curve("A_pixel_linear")
-    grid = np.linspace(max(P["A_pixel_linear"].min(), P["B_latent_linear"].min(),
-                           P["C_manifold_proj"].min()),
-                       min(P["A_pixel_linear"].max(), P["B_latent_linear"].max(),
-                           P["C_manifold_proj"].max()), 25)
+    grid = np.linspace(
+        max(
+            P["A_pixel_linear"].min(),
+            P["B_latent_linear"].min(),
+            P["C_manifold_proj"].min(),
+        ),
+        min(
+            P["A_pixel_linear"].max(),
+            P["B_latent_linear"].max(),
+            P["C_manifold_proj"].max(),
+        ),
+        25,
+    )
     la_g = np.interp(grid, pa, la)
-    print("\n--- Dominance on the PSNR-perceptual plane (perceptual at equal PSNR, "
-          "lower=better) ---")
+    print(
+        "\n--- Dominance on the PSNR-perceptual plane (perceptual at equal PSNR, "
+        "lower=better) ---"
+    )
     verdicts = {}
     for k in ["B_latent_linear", "C_manifold_proj"]:
         pk, lk = curve(k)
         lk_g = np.interp(grid, pk, lk)
-        gain = (la_g - lk_g)  # positive => k beats A (lower perceptual at same PSNR)
+        gain = la_g - lk_g  # positive => k beats A (lower perceptual at same PSNR)
         mean_gain = float(np.mean(gain))
         frac_better = float(np.mean(gain > 0))
         verdicts[k] = (mean_gain, frac_better)
-        print(f"{k:>18}: mean perceptual gain vs A = {mean_gain:+.4f} "
-              f"(>0 means curved path beats the straight line), "
-              f"better at {frac_better*100:.0f}% of PSNR levels")
+        print(
+            f"{k:>18}: mean perceptual gain vs A = {mean_gain:+.4f} "
+            f"(>0 means curved path beats the straight line), "
+            f"better at {frac_better*100:.0f}% of PSNR levels"
+        )
 
     best_gain = max(v[0] for v in verdicts.values())
     print("\nVERDICT:")
@@ -346,6 +382,7 @@ def main():
 
     # save raw curves
     import csv
+
     with open(args.out, "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(["traversal", "t", "psnr", "perceptual"])

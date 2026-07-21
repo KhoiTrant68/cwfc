@@ -1,0 +1,25 @@
+# Extra deps for the real-image track (real/*.py), beyond the core
+# torch + numpy the rest of the repo needs. Install with:
+#   pip install -r real/requirements.txt
+#
+# numpy<2.0 is required by compressai==1.2.8; if that constraint is dropped
+# in a newer compressai release this pin can likely be relaxed.
+
+numpy<2.0
+compressai
+torchvision
+pillow
+matplotlib
+
+# MS-ILLM baseline (real/baselines/run_msillm.py) + shared eval metrics
+# (real/eval.py reuses the same neuralcompression.metrics module so both are
+# scored identically): these are dependencies of facebookresearch/NeuralCompression,
+# loaded via torch.hub, not pip-installed directly (installing the repo itself
+# via pip pulls an old pinned scipy that needs a meson/cython toolchain to
+# build in many environments -- see the comment in run_msillm.py).
+torchmetrics
+lpips
+DISTS_pytorch
+torch-fidelity
+fvcore
+tqdm

@@ -29,6 +29,7 @@ DATA_ROOT=/path/to/cifar100 PY=python3 bash scripts/run_g4_full.sh
 | `run_g4_full.sh` | G4 hardened (3 seeds + condMMD) + grids | `results/g4_full.json`, `figs/` |
 | `make_figs.sh` | render frontier + D-P plane figures | `figs/*.png` |
 | `reproduce_all.sh` | G1-full → G4-full → figures (full paper pipeline) | `results/`, `figs/` |
+| `clean.sh` | remove Python/build/test caches, then isort+black the repo (needs `pip install -e .[dev]`) | — |
 
 Any extra flags are forwarded, e.g. `bash scripts/run_g4.sh --steps 3000`.
 Trailing `"$@"` passthrough is not available on `reproduce_all.sh`.

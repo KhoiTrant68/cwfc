@@ -34,3 +34,8 @@ resolves it.
   supported by `g4_wflow.py`).
 - Wire `WFlowAdapter` to a real W-Flow checkout to swap the tiny AE + toy flow for
   the full-scale conditional endpoint.
+- **Scale G4 to real images + a published baseline** (in progress, `real/`):
+  swap `TinyAE`/`CondVelocity` for a pretrained `compressai` codec + a U-Net
+  conditional flow on Kodak/CLIC, with real bpp and a comparison against
+  MS-ILLM (ICML 2023) on identical metrics. See
+  [`docs/RESULTS_REAL.md`](RESULTS_REAL.md).

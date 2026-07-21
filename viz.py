@@ -25,6 +25,7 @@ Usage:
                   --g4 results/g4_full.json --out figs
 Any argument may be omitted; only the figures whose inputs are present are drawn.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -33,12 +34,14 @@ import os
 
 try:
     import matplotlib
-    matplotlib.use("Agg")               # headless (Kaggle / servers)
+
+    matplotlib.use("Agg")  # headless (Kaggle / servers)
     import matplotlib.pyplot as plt
-except ImportError:                     # pragma: no cover
+except ImportError:  # pragma: no cover
     raise SystemExit(
         "viz.py needs matplotlib. Install it with:  pip install matplotlib\n"
-        "(or: pip install -e .[viz])")
+        "(or: pip install -e .[viz])"
+    )
 
 
 def _load(path):
@@ -57,7 +60,7 @@ def _ae_psnr(payload):
 
 def plot_g1(path, out):
     p = _load(path)
-    frontier = p["frontier"]            # {embed_name: [ {eta,psnr,mmd,div,...}, ]}
+    frontier = p["frontier"]  # {embed_name: [ {eta,psnr,mmd,div,...}, ]}
     embeds = list(frontier.keys())
     # x axis: categorical eta positions (etas include 0 -> no log axis)
     etas = [r["eta"] for r in frontier[embeds[0]]]
@@ -65,14 +68,17 @@ def plot_g1(path, out):
     xlabels = [f"{e:g}" for e in etas]
 
     fig, axes = plt.subplots(1, 3, figsize=(13, 4))
-    panels = [("div", "Var_z  (within-condition diversity)", True),
-              ("psnr", "PSNR (dB)", False),
-              ("mmd", "MMD (marginal realism)", True)]
+    panels = [
+        ("div", "Var_z  (within-condition diversity)", True),
+        ("psnr", "PSNR (dB)", False),
+        ("mmd", "MMD (marginal realism)", True),
+    ]
     for ax, (key, title, logy) in zip(axes, panels):
         for name in embeds:
             ys = [r[key] for r in frontier[name]]
             ax.plot(xs, ys, marker="o", label=name)
-        ax.set_xticks(xs); ax.set_xticklabels(xlabels)
+        ax.set_xticks(xs)
+        ax.set_xticklabels(xlabels)
         ax.set_xlabel(r"$\eta$ (cost-mixing knob)")
         ax.set_title(title)
         if logy:
@@ -82,10 +88,13 @@ def plot_g1(path, out):
     ae = _ae_psnr(p)
     fig.suptitle(
         f"G1 (aggregate extended-cost OT) — flat in η = NEGATIVE"
-        + (f"  |  frozen AE {ae:.1f} dB" if ae else ""), fontweight="bold")
+        + (f"  |  frozen AE {ae:.1f} dB" if ae else ""),
+        fontweight="bold",
+    )
     fig.tight_layout()
     dst = os.path.join(out, "g1_frontier.png")
-    fig.savefig(dst, dpi=140); plt.close(fig)
+    fig.savefig(dst, dpi=140)
+    plt.close(fig)
     print(f"saved {dst}")
 
 
@@ -96,7 +105,7 @@ def plot_g1(path, out):
 
 def plot_g4(path, out):
     p = _load(path)
-    rows = p["frontier"]                # [ {lam, psnr_sample, mmd, div, ...}, ]
+    rows = p["frontier"]  # [ {lam, psnr_sample, mmd, div, ...}, ]
     lams = [r["lam"] for r in rows]
 
     def col(key):
@@ -106,9 +115,11 @@ def plot_g4(path, out):
         return [r.get(key, 0.0) for r in rows]
 
     fig, axes = plt.subplots(1, 3, figsize=(13, 4))
-    panels = [("div", "div_std", "Var_z  (diversity ↓)", True),
-              ("psnr_sample", "psnr_sample_std", "PSNR sample (dB, ↑)", False),
-              ("mmd", "mmd_std", "MMD (marginal realism ↑ = worse)", False)]
+    panels = [
+        ("div", "div_std", "Var_z  (diversity ↓)", True),
+        ("psnr_sample", "psnr_sample_std", "PSNR sample (dB, ↑)", False),
+        ("mmd", "mmd_std", "MMD (marginal realism ↑ = worse)", False),
+    ]
     for ax, (key, skey, title, logy) in zip(axes, panels):
         ax.errorbar(lams, col(key), yerr=std(skey), marker="o", capsize=3)
         ax.set_xlabel(r"$\lambda$  (0 = perception, 1 = MMSE)")
@@ -119,18 +130,27 @@ def plot_g4(path, out):
     # conditional-MMD overlay if present (the fibre-level metric G1 lacked)
     if "cond_mmd" in rows[0]:
         ax2 = axes[2].twinx()
-        ax2.plot(lams, col("cond_mmd"), color="tab:red", marker="s",
-                 linestyle="--", label="conditional MMD")
+        ax2.plot(
+            lams,
+            col("cond_mmd"),
+            color="tab:red",
+            marker="s",
+            linestyle="--",
+            label="conditional MMD",
+        )
         ax2.set_ylabel("conditional MMD", color="tab:red")
         ax2.tick_params(axis="y", labelcolor="tab:red")
         ax2.legend(fontsize=8, loc="upper left")
     ae = _ae_psnr(p)
     fig.suptitle(
         "G4 (conditional rectified flow) — monotone in λ = POSITIVE"
-        + (f"  |  frozen AE {ae:.1f} dB" if ae else ""), fontweight="bold")
+        + (f"  |  frozen AE {ae:.1f} dB" if ae else ""),
+        fontweight="bold",
+    )
     fig.tight_layout()
     dst = os.path.join(out, "g4_frontier.png")
-    fig.savefig(dst, dpi=140); plt.close(fig)
+    fig.savefig(dst, dpi=140)
+    plt.close(fig)
     print(f"saved {dst}")
 
 
@@ -152,34 +172,54 @@ def plot_dp_plane(g1_path, g4_path, out, g1_embed=None):
         frontier = p["frontier"]
         name = g1_embed or ("pool" if "pool" in frontier else list(frontier)[0])
         rows = frontier[name]
-        xs = [r["mmd"] for r in rows]; ys = [r["psnr"] for r in rows]
-        ax.plot(xs, ys, marker="o", color="tab:gray",
-                label=f"G1 η-sweep ({name}) — a cluster, no frontier")
+        xs = [r["mmd"] for r in rows]
+        ys = [r["psnr"] for r in rows]
+        ax.plot(
+            xs,
+            ys,
+            marker="o",
+            color="tab:gray",
+            label=f"G1 η-sweep ({name}) — a cluster, no frontier",
+        )
         for r in rows:
-            ax.annotate(f"η={r['eta']:g}", (r["mmd"], r["psnr"]),
-                        fontsize=7, color="tab:gray",
-                        xytext=(3, 3), textcoords="offset points")
+            ax.annotate(
+                f"η={r['eta']:g}",
+                (r["mmd"], r["psnr"]),
+                fontsize=7,
+                color="tab:gray",
+                xytext=(3, 3),
+                textcoords="offset points",
+            )
 
     if g4_path and os.path.exists(g4_path):
         p = _load(g4_path)
         rows = p["frontier"]
-        xs = [r["mmd"] for r in rows]; ys = [r["psnr_sample"] for r in rows]
-        ax.plot(xs, ys, marker="s", color="tab:blue",
-                label="G4 λ-sweep — the D-P frontier")
+        xs = [r["mmd"] for r in rows]
+        ys = [r["psnr_sample"] for r in rows]
+        ax.plot(
+            xs, ys, marker="s", color="tab:blue", label="G4 λ-sweep — the D-P frontier"
+        )
         for r in rows:
-            ax.annotate(f"λ={r['lam']:g}", (r["mmd"], r["psnr_sample"]),
-                        fontsize=7, color="tab:blue",
-                        xytext=(3, -8), textcoords="offset points")
+            ax.annotate(
+                f"λ={r['lam']:g}",
+                (r["mmd"], r["psnr_sample"]),
+                fontsize=7,
+                color="tab:blue",
+                xytext=(3, -8),
+                textcoords="offset points",
+            )
 
     ax.set_xlabel("MMD  (marginal realism → worse)")
     ax.set_ylabel("PSNR (dB)  (fidelity → better)")
-    ax.set_title("Distortion–Perception plane: aggregate vs conditional OT",
-                 fontweight="bold")
+    ax.set_title(
+        "Distortion–Perception plane: aggregate vs conditional OT", fontweight="bold"
+    )
     ax.grid(True, alpha=0.3)
     ax.legend(fontsize=9)
     fig.tight_layout()
     dst = os.path.join(out, "dp_plane.png")
-    fig.savefig(dst, dpi=140); plt.close(fig)
+    fig.savefig(dst, dpi=140)
+    plt.close(fig)
     print(f"saved {dst}")
 
 
@@ -188,12 +228,24 @@ def plot_dp_plane(g1_path, g4_path, out, g1_embed=None):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--g1", type=str, default=None,
-                    help="g1_pilot result JSON (e.g. results/g1_potential_full.json)")
-    ap.add_argument("--g4", type=str, default=None,
-                    help="g4_wflow result JSON (e.g. results/g4_full.json)")
-    ap.add_argument("--g1_embed", type=str, default=None,
-                    help="which G1 embedding to plot on the D-P plane (default: pool)")
+    ap.add_argument(
+        "--g1",
+        type=str,
+        default=None,
+        help="g1_pilot result JSON (e.g. results/g1_potential_full.json)",
+    )
+    ap.add_argument(
+        "--g4",
+        type=str,
+        default=None,
+        help="g4_wflow result JSON (e.g. results/g4_full.json)",
+    )
+    ap.add_argument(
+        "--g1_embed",
+        type=str,
+        default=None,
+        help="which G1 embedding to plot on the D-P plane (default: pool)",
+    )
     ap.add_argument("--out", type=str, default="figs")
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)

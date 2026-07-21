@@ -62,6 +62,7 @@ Datasets:
 
 Runs on CPU. Use --smoke for a fast end-to-end check.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -158,11 +159,12 @@ class SynthImages:
         # smooth base: linear map from u to a few low-freq 2-D cosine coeffs / colour
         self.Wbase = torch.randn(ku, 3 * 3, generator=g) / math.sqrt(ku)
         # two fixed high-freq texture patterns (the modes)
-        yy, xx = torch.meshgrid(torch.linspace(0, math.pi, H),
-                                torch.linspace(0, math.pi, H), indexing="ij")
+        yy, xx = torch.meshgrid(
+            torch.linspace(0, math.pi, H), torch.linspace(0, math.pi, H), indexing="ij"
+        )
         t0 = torch.sin(4 * xx) * torch.cos(4 * yy)
         t1 = torch.cos(5 * xx + 5 * yy)
-        self.tex = torch.stack([t0, t1]).to(device)          # (2, H, W)
+        self.tex = torch.stack([t0, t1]).to(device)  # (2, H, W)
         self.to(device)
 
     def to(self, device):
@@ -172,23 +174,28 @@ class SynthImages:
     def _base(self, u):
         # u: (N, ku) -> 3 low-freq cosine coeffs per channel -> (N,3,H,W)
         H = self.H
-        c = (u @ self.Wbase).view(-1, 3, 3)                  # (N,3,3) coeffs
-        yy, xx = torch.meshgrid(torch.linspace(0, 1, H, device=self.device),
-                                torch.linspace(0, 1, H, device=self.device),
-                                indexing="ij")
-        basis = torch.stack([torch.ones_like(xx),
-                             torch.cos(math.pi * xx),
-                             torch.cos(math.pi * yy)])        # (3,H,W)
+        c = (u @ self.Wbase).view(-1, 3, 3)  # (N,3,3) coeffs
+        yy, xx = torch.meshgrid(
+            torch.linspace(0, 1, H, device=self.device),
+            torch.linspace(0, 1, H, device=self.device),
+            indexing="ij",
+        )
+        basis = torch.stack(
+            [torch.ones_like(xx), torch.cos(math.pi * xx), torch.cos(math.pi * yy)]
+        )  # (3,H,W)
         img = torch.einsum("ncj,jhw->nchw", c, basis)
         return torch.sigmoid(1.5 * img)
 
     def sample(self, n):
         u = torch.randn(n, self.ku, device=self.device)
         m = torch.randint(0, 2, (n,), device=self.device)
-        base = self._base(u)                                 # (N,3,H,W) in (0,1)
-        overlay = self.s * self.tex[m].unsqueeze(1)          # (N,1,H,W)
-        x = (base + overlay + self.sigma *
-             torch.randn(n, 3, self.H, self.H, device=self.device)).clamp(0, 1)
+        base = self._base(u)  # (N,3,H,W) in (0,1)
+        overlay = self.s * self.tex[m].unsqueeze(1)  # (N,1,H,W)
+        x = (
+            base
+            + overlay
+            + self.sigma * torch.randn(n, 3, self.H, self.H, device=self.device)
+        ).clamp(0, 1)
         return x
 
 
@@ -236,11 +243,12 @@ def _load_cifar100_images(root, max_n=5000):
             return _load_cifar100_images("./data", max_n)
         raise FileNotFoundError(
             f"No pickle 'train' (or .tar.gz) found under {root}. "
-            f"Check the --data_root path.")
+            f"Check the --data_root path."
+        )
 
     with open(train_path, "rb") as f:
         d = pickle.load(f, encoding="bytes")
-    data = d[b"data"][:max_n]                      # (n, 3072) uint8, row-major RGB
+    data = d[b"data"][:max_n]  # (n, 3072) uint8, row-major RGB
     x = torch.from_numpy(data.reshape(-1, 3, 32, 32).copy()).float() / 255.0
     print(f"cifar100: doc {x.shape[0]} anh tu {train_path}")
     return x
@@ -251,22 +259,25 @@ def make_dataset(name, H, seed, device, root="./data", download=False):
         return SynthImages(H=H, seed=seed, device=device)
     if name == "cifar":
         import os
+
         from torchvision import datasets, transforms
+
         if not download and not os.path.isdir(
-                os.path.join(root, "cifar-10-batches-py")):
+            os.path.join(root, "cifar-10-batches-py")
+        ):
             raise FileNotFoundError(
                 f"{root}/cifar-10-batches-py not found.\n"
                 f"Download it first:  python download_cifar.py --root {root}\n"
                 f"or on Kaggle: add the CIFAR-10 python dataset and extract the "
                 f"tar.gz into {root}/, "
-                f"or re-run with --download to let torchvision fetch it.")
+                f"or re-run with --download to let torchvision fetch it."
+            )
         tf = transforms.Compose([transforms.Resize(H), transforms.ToTensor()])
-        ds = datasets.CIFAR10(root=root, train=True, download=download,
-                              transform=tf)
+        ds = datasets.CIFAR10(root=root, train=True, download=download, transform=tf)
         imgs = torch.stack([ds[i][0] for i in range(min(len(ds), 5000))]).to(device)
         return _Wrap(imgs)
     if name == "cifar100":
-        x = _load_cifar100_images(root)            # (N,3,32,32) in [0,1]
+        x = _load_cifar100_images(root)  # (N,3,32,32) in [0,1]
         if H != 32:
             x = F.interpolate(x, size=(H, H), mode="bilinear", align_corners=False)
         return _Wrap(x.to(device))
@@ -283,13 +294,17 @@ class TinyAE(nn.Module):
         super().__init__()
         self.zc = zc
         self.enc = nn.Sequential(
-            nn.Conv2d(3, ch, 4, 2, 1), nn.GELU(),
-            nn.Conv2d(ch, ch, 4, 2, 1), nn.GELU(),   # 4x downsample -> drops high-freq
+            nn.Conv2d(3, ch, 4, 2, 1),
+            nn.GELU(),
+            nn.Conv2d(ch, ch, 4, 2, 1),
+            nn.GELU(),  # 4x downsample -> drops high-freq
             nn.Conv2d(ch, zc, 3, 1, 1),
         )
         self.dec = nn.Sequential(
-            nn.Conv2d(zc, ch, 3, 1, 1), nn.GELU(),
-            nn.ConvTranspose2d(ch, ch, 4, 2, 1), nn.GELU(),
+            nn.Conv2d(zc, ch, 3, 1, 1),
+            nn.GELU(),
+            nn.ConvTranspose2d(ch, ch, 4, 2, 1),
+            nn.GELU(),
             nn.ConvTranspose2d(ch, 3, 4, 2, 1),
         )
         # coarse quantization step -> loses the texture mode. SMALLER qscale =
@@ -315,10 +330,12 @@ def train_ae(ae, data, steps, N, lr, device):
     for _ in range(steps):
         x = data.sample(N)
         z = ae.encode(x)
-        zq = z + (ae.quantize(z) - z).detach()   # STE through the round
+        zq = z + (ae.quantize(z) - z).detach()  # STE through the round
         rec = ae.decode(zq)
         loss = F.mse_loss(rec, x)
-        opt.zero_grad(); loss.backward(); opt.step()
+        opt.zero_grad()
+        loss.backward()
+        opt.step()
     ae.eval()
     for p in ae.parameters():
         p.requires_grad_(False)
@@ -335,10 +352,14 @@ class CondGenImg(nn.Module):
         super().__init__()
         self.dz = dz
         self.net = nn.Sequential(
-            nn.Conv2d(zc + dz, ch, 3, 1, 1), nn.GELU(),
-            nn.ConvTranspose2d(ch, ch, 4, 2, 1), nn.GELU(),   # 2x
-            nn.Conv2d(ch, ch, 3, 1, 1), nn.GELU(),
-            nn.ConvTranspose2d(ch, ch, 4, 2, 1), nn.GELU(),   # 2x  -> matches AE 4x
+            nn.Conv2d(zc + dz, ch, 3, 1, 1),
+            nn.GELU(),
+            nn.ConvTranspose2d(ch, ch, 4, 2, 1),
+            nn.GELU(),  # 2x
+            nn.Conv2d(ch, ch, 3, 1, 1),
+            nn.GELU(),
+            nn.ConvTranspose2d(ch, ch, 4, 2, 1),
+            nn.GELU(),  # 2x  -> matches AE 4x
             nn.Conv2d(ch, 3, 3, 1, 1),
         )
 
@@ -364,7 +385,7 @@ def make_embed(kind, y_shape, seed=0, device="cpu"):
         g = torch.Generator().manual_seed(seed + 777)
         W = (torch.randn(flat, d, generator=g) / math.sqrt(flat)).to(device)
         return lambda y: y.flatten(1) @ W
-    if kind == "pool":                       # semantic: per-channel global avg
+    if kind == "pool":  # semantic: per-channel global avg
         return lambda y: y.mean(dim=(2, 3))
     raise ValueError(kind)
 
@@ -394,7 +415,9 @@ def geom_probe(ae, data, embeds, etas, N, eps, device):
     xf_hat, xf = x_hat.flatten(1), x.flatten(1)
     cx = torch.cdist(xf_hat, xf).pow(2) / xf.shape[1]
     cx = cx / cx[cx > 0].mean().clamp(min=1e-9)
-    print(f"\n=== Q1 geometry (diag_mass vs eta) — condition y_hat shape {tuple(y_shape)} ===")
+    print(
+        f"\n=== Q1 geometry (diag_mass vs eta) — condition y_hat shape {tuple(y_shape)} ==="
+    )
     print("  eta:  " + " ".join(f"{e:7.3g}" for e in etas))
     for name, kind in embeds:
         embed = make_embed(kind, y_shape, device=device)
@@ -481,26 +504,40 @@ def sinkhorn_div_loss(xf_hat, xf, cy_ab, cy_aa, eta, eps, iters=100):
     return ot_ab - 0.5 * ot_aa
 
 
-def train_one(ae, data, embed_kind, eta, y_shape, steps, N, eps, lr, device, seed,
-              loss_kind="debiased", debias_w=0.5, K=1):
+def train_one(
+    ae,
+    data,
+    embed_kind,
+    eta,
+    y_shape,
+    steps,
+    N,
+    eps,
+    lr,
+    device,
+    seed,
+    loss_kind="debiased",
+    debias_w=0.5,
+    K=1,
+):
     set_seed(seed)
     G = CondGenImg(zc=y_shape[0]).to(device)
     opt = torch.optim.Adam(G.parameters(), lr=lr)
     embed = make_embed(embed_kind, y_shape, seed=seed, device=device)
     for _ in range(steps):
-        x = data.sample(N)                                # real batch (N)
+        x = data.sample(N)  # real batch (N)
         y = ae.condition(x)
         # K noise draws per condition: repeat each y_hat K times so the generated
         # batch is (N*K), each row an independent z. K=1 -> identical to before.
         y_gen = y if K == 1 else y.repeat_interleave(K, dim=0)
-        x_hat = G(y_gen)                                  # (N*K,3,H,W), indep z
+        x_hat = G(y_gen)  # (N*K,3,H,W), indep z
         xf_hat, xf = x_hat.flatten(1), x.flatten(1)
         with torch.no_grad():
-            e_gen = embed(y_gen)                          # (N*K,d)
-            e_real = e_gen if K == 1 else embed(y)        # (N,d)
-            cy_gr = _cy(e_gen, e_real)                    # gen x real  (N*K,N)
+            e_gen = embed(y_gen)  # (N*K,d)
+            e_real = e_gen if K == 1 else embed(y)  # (N,d)
+            cy_gr = _cy(e_gen, e_real)  # gen x real  (N*K,N)
             need_gg = loss_kind in ("debiased", "potential")
-            cy_gg = _cy(e_gen, e_gen) if need_gg else None   # gen x gen (N*K,N*K)
+            cy_gg = _cy(e_gen, e_gen) if need_gg else None  # gen x gen (N*K,N*K)
         if loss_kind == "potential":
             # NON-detached Sinkhorn divergence: gradient flows through the dual
             # potentials, so the gen->gen term is a proper distribution divergence
@@ -518,7 +555,9 @@ def train_one(ae, data, embed_kind, eta, y_shape, steps, N, eps, lr, device, see
                 # (diverse-sampling) endpoint at low eta. (W-Flow gen-to-gen map.)
                 P_gg, cx_gg = _plan_and_cost(xf_hat, xf_hat.detach(), cy_gg, eta, eps)
                 loss = loss - debias_w * (P_gg * cx_gg).sum()
-        opt.zero_grad(); loss.backward(); opt.step()
+        opt.zero_grad()
+        loss.backward()
+        opt.step()
 
     # eval  (single sample per condition -> paired PSNR / MMD; diversity over K=8 z)
     with torch.no_grad():
@@ -533,10 +572,26 @@ def train_one(ae, data, embed_kind, eta, y_shape, steps, N, eps, lr, device, see
     return psnr, mse, mmd, div
 
 
-def frontier(ae, data, embeds, etas, y_shape, steps, N, eps, lr, device, seeds,
-             loss_kind="debiased", debias_w=0.5, K=1):
-    print(f"\n=== Q2 frontier (PSNR up=fidelity, MMD down=realism, Div=Var_z) — "
-          f"steps={steps}, N={N}, K={K}, seeds={list(seeds)}, loss={loss_kind} ===")
+def frontier(
+    ae,
+    data,
+    embeds,
+    etas,
+    y_shape,
+    steps,
+    N,
+    eps,
+    lr,
+    device,
+    seeds,
+    loss_kind="debiased",
+    debias_w=0.5,
+    K=1,
+):
+    print(
+        f"\n=== Q2 frontier (PSNR up=fidelity, MMD down=realism, Div=Var_z) — "
+        f"steps={steps}, N={N}, K={K}, seeds={list(seeds)}, loss={loss_kind} ==="
+    )
     out = {}
     for name, kind in embeds:
         print(f"\n embedding = {name}")
@@ -545,16 +600,37 @@ def frontier(ae, data, embeds, etas, y_shape, steps, N, eps, lr, device, seeds,
         for eta in etas:
             ps, md, dv = [], [], []
             for sd in seeds:
-                psnr, _, mmd, div = train_one(ae, data, kind, eta, y_shape,
-                                              steps, N, eps, lr, device, sd,
-                                              loss_kind=loss_kind, debias_w=debias_w,
-                                              K=K)
-                ps.append(psnr); md.append(mmd); dv.append(div)
-            row = {"eta": eta, "psnr": float(np.mean(ps)), "psnr_std": float(np.std(ps)),
-                   "mmd": float(np.mean(md)), "div": float(np.mean(dv))}
+                psnr, _, mmd, div = train_one(
+                    ae,
+                    data,
+                    kind,
+                    eta,
+                    y_shape,
+                    steps,
+                    N,
+                    eps,
+                    lr,
+                    device,
+                    sd,
+                    loss_kind=loss_kind,
+                    debias_w=debias_w,
+                    K=K,
+                )
+                ps.append(psnr)
+                md.append(mmd)
+                dv.append(div)
+            row = {
+                "eta": eta,
+                "psnr": float(np.mean(ps)),
+                "psnr_std": float(np.std(ps)),
+                "mmd": float(np.mean(md)),
+                "div": float(np.mean(dv)),
+            }
             rows.append(row)
-            print(f"{eta:>8.3g} {np.mean(ps):>10.2f} {np.mean(md):>12.4e} "
-                  f"{np.mean(dv):>12.4e}")
+            print(
+                f"{eta:>8.3g} {np.mean(ps):>10.2f} {np.mean(md):>12.4e} "
+                f"{np.mean(dv):>12.4e}"
+            )
         out[name] = rows
     print("\nRead: within one embedding, PSNR should RISE and MMD FALL-then-RISE")
     print("as eta grows (dual role: mid-eta best realism, high-eta best fidelity).")
@@ -590,19 +666,47 @@ def _gpu_worker(dev, jobs, ae_state, data_spec, cfg, out_q):
         ae.eval()
         for p in ae.parameters():
             p.requires_grad_(False)
-        for (name, kind, eta, sd) in jobs:
+        for name, kind, eta, sd in jobs:
             psnr, _, mmd, div = train_one(
-                ae, data, kind, eta, tuple(cfg["y_shape"]), cfg["steps"],
-                cfg["N"], cfg["eps"], cfg["lr"], dev, sd,
-                loss_kind=cfg["loss_kind"], debias_w=cfg["debias_w"], K=cfg["K"])
+                ae,
+                data,
+                kind,
+                eta,
+                tuple(cfg["y_shape"]),
+                cfg["steps"],
+                cfg["N"],
+                cfg["eps"],
+                cfg["lr"],
+                dev,
+                sd,
+                loss_kind=cfg["loss_kind"],
+                debias_w=cfg["debias_w"],
+                K=cfg["K"],
+            )
             out_q.put(("ok", name, eta, sd, psnr, mmd, div, dev))
     except Exception as e:
         out_q.put(("err", repr(e), dev, None, None, None, None, None))
 
 
-def frontier_parallel(ae, data, embeds, etas, y_shape, steps, N, eps, lr,
-                      devices, seeds, loss_kind="debiased", debias_w=0.5, K=1,
-                      H=16, ae_zc=4, ae_qscale=1.0):
+def frontier_parallel(
+    ae,
+    data,
+    embeds,
+    etas,
+    y_shape,
+    steps,
+    N,
+    eps,
+    lr,
+    devices,
+    seeds,
+    loss_kind="debiased",
+    debias_w=0.5,
+    K=1,
+    H=16,
+    ae_zc=4,
+    ae_qscale=1.0,
+):
     import torch.multiprocessing as mp
 
     if isinstance(data, SynthImages):
@@ -610,22 +714,33 @@ def frontier_parallel(ae, data, embeds, etas, y_shape, steps, N, eps, lr,
     else:
         data_spec = ("pool", data.pool.cpu())
     ae_state = {k: v.cpu() for k, v in ae.state_dict().items()}
-    cfg = dict(y_shape=list(y_shape), steps=steps, N=N, eps=eps, lr=lr,
-               loss_kind=loss_kind, debias_w=debias_w, K=K,
-               ae_zc=ae_zc, ae_qscale=ae_qscale)
+    cfg = dict(
+        y_shape=list(y_shape),
+        steps=steps,
+        N=N,
+        eps=eps,
+        lr=lr,
+        loss_kind=loss_kind,
+        debias_w=debias_w,
+        K=K,
+        ae_zc=ae_zc,
+        ae_qscale=ae_qscale,
+    )
 
-    jobs = [(name, kind, eta, sd)
-            for name, kind in embeds for eta in etas for sd in seeds]
-    chunks = [jobs[i::len(devices)] for i in range(len(devices))]
-    print(f"\n=== Q2 frontier PARALLEL on {devices} — {len(jobs)} jobs "
-          f"(steps={steps}, N={N}, K={K}, loss={loss_kind}) ===")
+    jobs = [
+        (name, kind, eta, sd) for name, kind in embeds for eta in etas for sd in seeds
+    ]
+    chunks = [jobs[i :: len(devices)] for i in range(len(devices))]
+    print(
+        f"\n=== Q2 frontier PARALLEL on {devices} — {len(jobs)} jobs "
+        f"(steps={steps}, N={N}, K={K}, loss={loss_kind}) ==="
+    )
 
     ctx = mp.get_context("spawn")
     q = ctx.Queue()
     procs = []
     for dev, ch in zip(devices, chunks):
-        p = ctx.Process(target=_gpu_worker,
-                        args=(dev, ch, ae_state, data_spec, cfg, q))
+        p = ctx.Process(target=_gpu_worker, args=(dev, ch, ae_state, data_spec, cfg, q))
         p.start()
         procs.append(p)
 
@@ -638,8 +753,10 @@ def frontier_parallel(ae, data, embeds, etas, y_shape, steps, N, eps, lr,
             raise RuntimeError(f"worker {msg[2]} error: {msg[1]}")
         _, name, eta, sd, psnr, mmd, div, dev = msg
         res.setdefault((name, eta), []).append((psnr, mmd, div))
-        print(f"  [{i+1:>3}/{len(jobs)}] {dev}  {name:>6} eta={eta:<7g} seed={sd} "
-              f"-> PSNR={psnr:6.2f}  MMD={mmd:.3e}  Div={div:.3e}")
+        print(
+            f"  [{i+1:>3}/{len(jobs)}] {dev}  {name:>6} eta={eta:<7g} seed={sd} "
+            f"-> PSNR={psnr:6.2f}  MMD={mmd:.3e}  Div={div:.3e}"
+        )
     for p in procs:
         p.join()
 
@@ -651,13 +768,22 @@ def frontier_parallel(ae, data, embeds, etas, y_shape, steps, N, eps, lr,
         rows = []
         for eta in etas:
             vals = res[(name, eta)]
-            ps = [v[0] for v in vals]; md = [v[1] for v in vals]
+            ps = [v[0] for v in vals]
+            md = [v[1] for v in vals]
             dv = [v[2] for v in vals]
-            rows.append({"eta": eta, "psnr": float(np.mean(ps)),
-                         "psnr_std": float(np.std(ps)),
-                         "mmd": float(np.mean(md)), "div": float(np.mean(dv))})
-            print(f"{eta:>8.3g} {np.mean(ps):>10.2f} {np.mean(md):>12.4e} "
-                  f"{np.mean(dv):>12.4e}")
+            rows.append(
+                {
+                    "eta": eta,
+                    "psnr": float(np.mean(ps)),
+                    "psnr_std": float(np.std(ps)),
+                    "mmd": float(np.mean(md)),
+                    "div": float(np.mean(dv)),
+                }
+            )
+            print(
+                f"{eta:>8.3g} {np.mean(ps):>10.2f} {np.mean(md):>12.4e} "
+                f"{np.mean(dv):>12.4e}"
+            )
         out[name] = rows
     return out
 
@@ -669,50 +795,89 @@ def frontier_parallel(ae, data, embeds, etas, y_shape, steps, N, eps, lr,
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--dataset", choices=["synth", "cifar", "cifar100"],
-                    default="synth")
-    ap.add_argument("--data_root", type=str, default="./data",
-                    help="directory holding cifar-10-batches-py (pre-downloaded data)")
-    ap.add_argument("--download", action="store_true",
-                    help="let torchvision download CIFAR-10 (OFF by default; "
-                         "use download_cifar.py to fetch it first)")
+    ap.add_argument(
+        "--dataset", choices=["synth", "cifar", "cifar100"], default="synth"
+    )
+    ap.add_argument(
+        "--data_root",
+        type=str,
+        default="./data",
+        help="directory holding cifar-10-batches-py (pre-downloaded data)",
+    )
+    ap.add_argument(
+        "--download",
+        action="store_true",
+        help="let torchvision download CIFAR-10 (OFF by default; "
+        "use download_cifar.py to fetch it first)",
+    )
     ap.add_argument("--mode", choices=["geom", "train", "both"], default="both")
     ap.add_argument("--H", type=int, default=16)
     ap.add_argument("--N", type=int, default=256)
     ap.add_argument("--steps", type=int, default=1500)
     ap.add_argument("--ae_steps", type=int, default=800)
-    ap.add_argument("--ae_zc", type=int, default=4,
-                    help="AE latent channels. Smaller => weaker AE => more residual "
-                         "for a frontier (the 2nd lever to lower AE recon).")
-    ap.add_argument("--ae_qscale", type=float, default=1.0,
-                    help="AE quantization fineness (step = 1/qscale). SMALLER => coarser "
-                         "=> weaker AE. Set ~0.5 to pull AE recon down to ~18-20 dB.")
+    ap.add_argument(
+        "--ae_zc",
+        type=int,
+        default=4,
+        help="AE latent channels. Smaller => weaker AE => more residual "
+        "for a frontier (the 2nd lever to lower AE recon).",
+    )
+    ap.add_argument(
+        "--ae_qscale",
+        type=float,
+        default=1.0,
+        help="AE quantization fineness (step = 1/qscale). SMALLER => coarser "
+        "=> weaker AE. Set ~0.5 to pull AE recon down to ~18-20 dB.",
+    )
     ap.add_argument("--eps", type=float, default=0.05)
     ap.add_argument("--lr", type=float, default=1e-3)
-    ap.add_argument("--K", type=int, default=1,
-                    help="z draws per condition. >1 forces WITHIN-condition diversity "
-                         "(cost: the generated batch becomes N*K).")
+    ap.add_argument(
+        "--K",
+        type=int,
+        default=1,
+        help="z draws per condition. >1 forces WITHIN-condition diversity "
+        "(cost: the generated batch becomes N*K).",
+    )
     ap.add_argument("--seeds", type=int, nargs="+", default=[0, 1])
-    ap.add_argument("--etas", type=float, nargs="+",
-                    default=[0.0, 0.1, 0.3, 1.0, 3.0, 10.0, 100.0])
-    ap.add_argument("--embeds", type=str, nargs="+",
-                    default=["raw", "proj8", "pool"])
-    ap.add_argument("--loss", choices=["debiased", "crude", "potential"],
-                    default="debiased",
-                    help="crude = A1 plan-weighted P-detach (regress-to-mean baseline); "
-                         "debiased = adds detached gen-gen debias term; "
-                         "potential = NON-detached Sinkhorn divergence (geomloss-style, "
-                         "gradient through potentials -> best shot at the diversity axis)")
-    ap.add_argument("--debias_w", type=float, default=0.5,
-                    help="weight of the gen-gen debiasing term (raise if diversity "
-                         "stays collapsed at full budget)")
-    ap.add_argument("--devices", type=str, nargs="+", default=None,
-                    help="devices to train on in parallel, e.g. cuda:0 cuda:1. "
-                         "Default: automatically use ALL visible GPUs (or cpu).")
-    ap.add_argument("--out", type=str, default=None,
-                    help="path to save results JSON (e.g. g1_result.json)")
-    ap.add_argument("--smoke", action="store_true",
-                    help="tiny fast end-to-end run (overrides sizes)")
+    ap.add_argument(
+        "--etas", type=float, nargs="+", default=[0.0, 0.1, 0.3, 1.0, 3.0, 10.0, 100.0]
+    )
+    ap.add_argument("--embeds", type=str, nargs="+", default=["raw", "proj8", "pool"])
+    ap.add_argument(
+        "--loss",
+        choices=["debiased", "crude", "potential"],
+        default="debiased",
+        help="crude = A1 plan-weighted P-detach (regress-to-mean baseline); "
+        "debiased = adds detached gen-gen debias term; "
+        "potential = NON-detached Sinkhorn divergence (geomloss-style, "
+        "gradient through potentials -> best shot at the diversity axis)",
+    )
+    ap.add_argument(
+        "--debias_w",
+        type=float,
+        default=0.5,
+        help="weight of the gen-gen debiasing term (raise if diversity "
+        "stays collapsed at full budget)",
+    )
+    ap.add_argument(
+        "--devices",
+        type=str,
+        nargs="+",
+        default=None,
+        help="devices to train on in parallel, e.g. cuda:0 cuda:1. "
+        "Default: automatically use ALL visible GPUs (or cpu).",
+    )
+    ap.add_argument(
+        "--out",
+        type=str,
+        default=None,
+        help="path to save results JSON (e.g. g1_result.json)",
+    )
+    ap.add_argument(
+        "--smoke",
+        action="store_true",
+        help="tiny fast end-to-end run (overrides sizes)",
+    )
     args = ap.parse_args()
 
     if args.smoke:
@@ -726,14 +891,22 @@ def main():
         devices = [f"cuda:{i}" for i in range(torch.cuda.device_count())]
     else:
         devices = ["cpu"]
-    device = devices[0]          # AE + geom probe run on the first device
-    print(f"devices={devices}  dataset={args.dataset}  H={args.H}  "
-          f"embeds={args.embeds}  etas={args.etas}  K={args.K}  "
-          f"ae_zc={args.ae_zc} ae_qscale={args.ae_qscale}")
+    device = devices[0]  # AE + geom probe run on the first device
+    print(
+        f"devices={devices}  dataset={args.dataset}  H={args.H}  "
+        f"embeds={args.embeds}  etas={args.etas}  K={args.K}  "
+        f"ae_zc={args.ae_zc} ae_qscale={args.ae_qscale}"
+    )
 
     set_seed(0)
-    data = make_dataset(args.dataset, args.H, seed=0, device=device,
-                        root=args.data_root, download=args.download)
+    data = make_dataset(
+        args.dataset,
+        args.H,
+        seed=0,
+        device=device,
+        root=args.data_root,
+        download=args.download,
+    )
 
     ae = TinyAE(zc=args.ae_zc, qscale=args.ae_qscale).to(device)
     rec = train_ae(ae, data, steps=args.ae_steps, N=args.N, lr=1e-3, device=device)
@@ -742,8 +915,10 @@ def main():
         y_hat = ae.condition(x)
         y_shape = tuple(y_hat.shape[1:])
         ae_psnr = -10 * math.log10(float((ae.decode(y_hat) - x).pow(2).mean()))
-    print(f"tiny AE trained: recon mse={rec:.4f}, quantized-recon PSNR={ae_psnr:.2f} dB, "
-          f"condition y_hat shape={y_shape}")
+    print(
+        f"tiny AE trained: recon mse={rec:.4f}, quantized-recon PSNR={ae_psnr:.2f} dB, "
+        f"condition y_hat shape={y_shape}"
+    )
 
     embeds = [(e, e) for e in args.embeds]
 
@@ -752,25 +927,71 @@ def main():
     results = None
     if args.mode in ("train", "both"):
         if len(devices) > 1:
-            results = frontier_parallel(ae, data, embeds, args.etas, y_shape,
-                                        args.steps, args.N, args.eps, args.lr,
-                                        devices, args.seeds,
-                                        loss_kind=args.loss,
-                                        debias_w=args.debias_w, K=args.K, H=args.H,
-                                        ae_zc=args.ae_zc, ae_qscale=args.ae_qscale)
+            results = frontier_parallel(
+                ae,
+                data,
+                embeds,
+                args.etas,
+                y_shape,
+                args.steps,
+                args.N,
+                args.eps,
+                args.lr,
+                devices,
+                args.seeds,
+                loss_kind=args.loss,
+                debias_w=args.debias_w,
+                K=args.K,
+                H=args.H,
+                ae_zc=args.ae_zc,
+                ae_qscale=args.ae_qscale,
+            )
         else:
-            results = frontier(ae, data, embeds, args.etas, y_shape, args.steps,
-                               args.N, args.eps, args.lr, device, args.seeds,
-                               loss_kind=args.loss, debias_w=args.debias_w, K=args.K)
+            results = frontier(
+                ae,
+                data,
+                embeds,
+                args.etas,
+                y_shape,
+                args.steps,
+                args.N,
+                args.eps,
+                args.lr,
+                device,
+                args.seeds,
+                loss_kind=args.loss,
+                debias_w=args.debias_w,
+                K=args.K,
+            )
 
     if args.out and results is not None:
         import json
-        payload = {"config": {k: getattr(args, k) for k in
-                              ["dataset", "H", "N", "steps", "ae_steps", "ae_zc",
-                               "ae_qscale", "eps", "lr", "K", "seeds", "etas",
-                               "embeds", "loss", "debias_w"]},
-                   "ae_recon_psnr": ae_psnr, "y_shape": list(y_shape),
-                   "frontier": results}
+
+        payload = {
+            "config": {
+                k: getattr(args, k)
+                for k in [
+                    "dataset",
+                    "H",
+                    "N",
+                    "steps",
+                    "ae_steps",
+                    "ae_zc",
+                    "ae_qscale",
+                    "eps",
+                    "lr",
+                    "K",
+                    "seeds",
+                    "etas",
+                    "embeds",
+                    "loss",
+                    "debias_w",
+                ]
+            },
+            "ae_recon_psnr": ae_psnr,
+            "y_shape": list(y_shape),
+            "frontier": results,
+        }
         with open(args.out, "w") as f:
             json.dump(payload, f, indent=2)
         print(f"\nsaved results -> {args.out}")

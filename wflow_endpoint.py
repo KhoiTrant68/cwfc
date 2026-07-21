@@ -22,12 +22,12 @@ the prior regulariser) is verified in-script with a synthetic generator.
 NOT TESTED HERE: WFlowAdapter (loads the real W-Flow DiT) -- you must wire it to
 your checkout's loader/forward; the call sites are marked  # WIRE.
 """
+
 from __future__ import annotations
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
 
 # ---------------------------------------------------------------------------
 # Generic inversion (TESTED with a synthetic generator below)
@@ -35,9 +35,9 @@ import torch.nn.functional as F
 
 
 def invert_to_consistency(
-    generator,        # callable: z_ref (B, *gshape) -> z_hat (B, *latent_shape)
-    z_q,              # (B, C, H, W) transmitted quantized latent
-    delta,            # quantization step that produced z_q
+    generator,  # callable: z_ref (B, *gshape) -> z_hat (B, *latent_shape)
+    z_q,  # (B, C, H, W) transmitted quantized latent
+    delta,  # quantization step that produced z_q
     gen_input_shape,  # shape of one z_ref sample, e.g. (4, 32, 32)
     steps=400,
     lr=0.05,
@@ -61,20 +61,22 @@ def invert_to_consistency(
         for s in range(steps):
             z_hat = generator(z_ref)
             resid = z_hat - z_q
-            outside = F.relu(resid.abs() - half)            # 0 inside the cell
-            cons = outside.pow(2).mean(dim=(1, 2, 3))        # (B,)
+            outside = F.relu(resid.abs() - half)  # 0 inside the cell
+            cons = outside.pow(2).mean(dim=(1, 2, 3))  # (B,)
             prior = z_ref.pow(2).mean(dim=tuple(range(1, z_ref.dim())))
             loss = (cons + prior_w * prior).sum()
             opt.zero_grad()
             loss.backward()
             opt.step()
             if verbose and s % max(1, steps // 4) == 0:
-                print(f"  [restart {r}] step {s}: cons={cons.mean().item():.4e} "
-                      f"prior={prior.mean().item():.3f}")
+                print(
+                    f"  [restart {r}] step {s}: cons={cons.mean().item():.4e} "
+                    f"prior={prior.mean().item():.3f}"
+                )
         with torch.no_grad():
             z_hat = generator(z_ref)
             outside = F.relu((z_hat - z_q).abs() - half)
-            out_per = outside.pow(2).mean(dim=(1, 2, 3))     # (B,)
+            out_per = outside.pow(2).mean(dim=(1, 2, 3))  # (B,)
             improved = out_per < best_out
             if best_z_hat is None:
                 best_z_hat = z_hat.clone()
@@ -106,8 +108,7 @@ class WFlowAdapter(nn.Module):
     and the one-step forward. See inference_ours.py / models/ for the exact API.
     """
 
-    def __init__(self, ckpt_path, config_path, class_id, cfg_scale=1.09,
-                 device="cuda"):
+    def __init__(self, ckpt_path, config_path, class_id, cfg_scale=1.09, device="cuda"):
         super().__init__()
         self.device = device
         self.class_id = class_id
@@ -140,8 +141,9 @@ def _quantize(z, delta):
     return torch.round(z / delta) * delta
 
 
-def build_endpoints_wflow(sdvae, wflow_generator, x, delta, class_ids,
-                          inv_kwargs=None, device="cuda"):
+def build_endpoints_wflow(
+    sdvae, wflow_generator, x, delta, class_ids, inv_kwargs=None, device="cuda"
+):
     """
     x*  = decode(z_q)                               (MMSE endpoint)
     x0  = decode(invert(G -> consistent with z_q))  (perception endpoint)
@@ -160,8 +162,7 @@ def build_endpoints_wflow(sdvae, wflow_generator, x, delta, class_ids,
     # NOTE: if your W-Flow generator takes class id per call, set it before
     # calling (here we assume wflow_generator already holds the class, or wrap).
     z_hat, info = invert_to_consistency(
-        wflow_generator, z_q, delta, gen_input_shape=gshape,
-        device=device, **inv_kwargs
+        wflow_generator, z_q, delta, gen_input_shape=gshape, device=device, **inv_kwargs
     )
     with torch.no_grad():
         x_zero = sdvae.decode(z_hat).clamp(0, 1)
@@ -183,14 +184,17 @@ if __name__ == "__main__":
     # gain that its output spans a range >> delta, so a random z_ref is NOT
     # trivially consistent and inversion has to actually work.
     gen = nn.Sequential(
-        nn.Conv2d(C, 64, 3, 1, 1), nn.Tanh(),
-        nn.Conv2d(64, 64, 3, 1, 1), nn.Tanh(),
+        nn.Conv2d(C, 64, 3, 1, 1),
+        nn.Tanh(),
+        nn.Conv2d(64, 64, 3, 1, 1),
+        nn.Tanh(),
         nn.Conv2d(64, C, 3, 1, 1),
     ).to(device)
     with torch.no_grad():
         for m in gen:
             if isinstance(m, nn.Conv2d):
-                m.weight.mul_(2.5); m.bias.normal_(0, 1.5)
+                m.weight.mul_(2.5)
+                m.bias.normal_(0, 1.5)
     for p in gen.parameters():
         p.requires_grad_(False)
 
@@ -201,30 +205,52 @@ if __name__ == "__main__":
     with torch.no_grad():
         z_target = generator(torch.randn(B, C, H, W))
         z_q = _quantize(z_target, delta)
-        print(f"target latent range ~ [{z_q.min():.1f}, {z_q.max():.1f}], "
-              f"delta/2={delta/2}")
+        print(
+            f"target latent range ~ [{z_q.min():.1f}, {z_q.max():.1f}], "
+            f"delta/2={delta/2}"
+        )
 
     # baseline: average outside-cell residual over random inits
     with torch.no_grad():
-        outs = [F.relu((generator(torch.randn(B, C, H, W)) - z_q).abs()
-                       - delta / 2).pow(2).mean().item() for _ in range(5)]
+        outs = [
+            F.relu((generator(torch.randn(B, C, H, W)) - z_q).abs() - delta / 2)
+            .pow(2)
+            .mean()
+            .item()
+            for _ in range(5)
+        ]
         base = sum(outs) / len(outs)
         print(f"random init  outside-cell residual = {base:.4e}")
 
     z_hat, info = invert_to_consistency(
-        generator, z_q, delta, gen_input_shape=(C, H, W),
-        steps=500, lr=0.05, prior_w=0.005, restarts=3, device=device, verbose=True,
+        generator,
+        z_q,
+        delta,
+        gen_input_shape=(C, H, W),
+        steps=500,
+        lr=0.05,
+        prior_w=0.005,
+        restarts=3,
+        device=device,
+        verbose=True,
     )
     inside = ((z_hat - z_q).abs() <= delta / 2).float().mean()
     typical_overshoot = info["mean_outside_cell"] ** 0.5
-    print(f"after inversion: mean outside-cell = {info['mean_outside_cell']:.4e} "
-          f"(baseline {base:.4e}; ~{base/max(info['mean_outside_cell'],1e-12):.0f}x lower)")
-    print(f"typical overshoot beyond the cell boundary = {typical_overshoot:.4f} "
-          f"(cell half-width = {delta/2})")
+    print(
+        f"after inversion: mean outside-cell = {info['mean_outside_cell']:.4e} "
+        f"(baseline {base:.4e}; ~{base/max(info['mean_outside_cell'],1e-12):.0f}x lower)"
+    )
+    print(
+        f"typical overshoot beyond the cell boundary = {typical_overshoot:.4f} "
+        f"(cell half-width = {delta/2})"
+    )
     print(f"fraction of coords strictly inside the cell = {inside.item()*100:.1f}%")
     # The consistency quantity that matters is the outside-cell residual (how much
     # transmitted info is violated), not strict frac-inside (coords on the cell
     # boundary count as 'outside' but cost ~0).
     ok = info["mean_outside_cell"] < base * 0.05
-    print("PASS: inversion drives G(z_ref) into the quant cell (consistency met)"
-          if ok else "weak/needs tuning")
+    print(
+        "PASS: inversion drives G(z_ref) into the quant cell (consistency met)"
+        if ok
+        else "weak/needs tuning"
+    )

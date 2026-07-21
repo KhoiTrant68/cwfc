@@ -3,7 +3,9 @@
 DATA_ROOT ?= /kaggle/input/datasets/fedesoriano/cifar100
 PY ?= python
 
-.PHONY: help smoke selftest g1 g1-full g4 g4-full toy dp-sandbox figs
+.PHONY: help smoke selftest g1 g1-full g4 g4-full toy dp-sandbox figs \
+        real-data real-baseline real-sanity real-train real-train-mini \
+        real-train-ddp real-eval real-figs clean
 
 help:
 	@echo "Targets:"
@@ -15,6 +17,15 @@ help:
 	@echo "  g4         G4 conditional-flow lambda frontier, seed 0"
 	@echo "  g4-full    G4 hardened: 3 seeds + conditional-MMD"
 	@echo "  figs       render frontier + D-P plane figures from results/ JSONs"
+	@echo "  real-data      download Kodak + CLIC (real/data/get_*.sh)"
+	@echo "  real-baseline  MS-ILLM baseline on Kodak (no training; real/baselines/run_msillm.py)"
+	@echo "  real-sanity    kNN conditional-fibre sanity check on CLIC train (real/data.py)"
+	@echo "  real-train     train the real-scale lambda-conditioned flow (real/flow.py)"
+	@echo "  real-train-mini  same, on a --max_images mini subset (quick stability check)"
+	@echo "  real-train-ddp   same as real-train, but multi-GPU via torchrun (e.g. Kaggle 2xT4)"
+	@echo "  real-eval      eval the trained checkpoint on Kodak (real/eval.py)"
+	@echo "  real-figs      CWFC vs MS-ILLM D-P plane (real/viz_real.py)"
+	@echo "  clean      remove Python/build/test caches, then isort+black the repo (scripts/clean.sh)"
 
 smoke:
 	$(PY) g1_pilot.py --smoke
@@ -57,3 +68,44 @@ g4-full:
 figs:
 	$(PY) viz.py --g1 results/g1_potential_full.json \
 	  --g4 results/g4_full.json --out figs
+
+real-data:
+	bash real/data/get_kodak.sh data/kodak
+	bash real/data/get_clic.sh data/clic
+
+real-baseline:
+	$(PY) real/baselines/run_msillm.py --data_root data/kodak \
+	  --qualities 1 2 3 4 5 6 --out results/baseline_msillm_kodak.json
+
+real-sanity:
+	$(PY) real/data.py --image_root data/clic/train --out figs/real_knn_sanity.png
+
+real-train:
+	$(PY) real/flow.py --train_root data/clic/train --quality 1 \
+	  --lams 0 0.25 0.5 0.75 1 --save_checkpoint_dir ckpts \
+	  --out results/g4_real_train.json
+
+real-train-mini:
+	$(PY) real/flow.py --train_root data/clic/train --max_images 50 \
+	  --patch 128 --npool 200 --steps 200 --lams 0 0.5 1 \
+	  --out results/g4_real_mini.json
+
+# multi-GPU via torchrun (e.g. Kaggle 2xT4); --N is batch size PER GPU.
+# If NCCL hangs on shared multi-GPU infra, try prefixing with
+# NCCL_P2P_DISABLE=1 NCCL_IB_DISABLE=1.
+real-train-ddp:
+	torchrun --standalone --nproc_per_node=2 real/flow.py \
+	  --train_root data/clic/train --quality 1 \
+	  --lams 0 0.25 0.5 0.75 1 --save_checkpoint_dir ckpts \
+	  --out results/g4_real_train.json
+
+real-eval:
+	$(PY) real/eval.py --test_root data/kodak --checkpoint ckpts/g4_real_seed0.pt \
+	  --lams 0 0.25 0.5 0.75 1 --out results/eval_real_kodak.json
+
+real-figs:
+	$(PY) real/viz_real.py --baseline results/baseline_msillm_kodak.json \
+	  --cwfc results/eval_real_kodak.json --out figs
+
+clean:
+	bash scripts/clean.sh

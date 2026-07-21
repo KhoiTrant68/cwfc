@@ -29,8 +29,15 @@ viz = ["matplotlib"]
 entropy = ["compressai", "torchvision", "pillow"]
 # derisk_dp.py "real" mode — Stable-Diffusion VAE + LPIPS
 dp = ["diffusers", "lpips", "torchvision", "pillow"]
+# real/ — Kodak/CLIC scale-up + MS-ILLM baseline (see real/requirements.txt
+# and docs/RESULTS_REAL.md for the full list / rationale)
+real = ["compressai", "torchvision", "pillow", "matplotlib", "torchmetrics",
+        "lpips", "DISTS_pytorch", "torch-fidelity", "fvcore", "tqdm"]
 # everything
-all = ["matplotlib", "compressai", "torchvision", "pillow", "diffusers", "lpips"]
+all = ["matplotlib", "compressai", "torchvision", "pillow", "diffusers", "lpips",
+       "torchmetrics", "DISTS_pytorch", "torch-fidelity", "fvcore", "tqdm"]
+# scripts/clean.sh's isort + black formatting pass
+dev = ["black", "isort"]
 
 [project.urls]
 Repository = "https://github.com/KhoiTrant68/cwfc"
@@ -48,3 +55,16 @@ py-modules = [
     "kaggle_g1",
     "g4_wflow",
 ]
+packages = ["real", "real.baselines"]
+
+[tool.black]
+target-version = ["py39"]
+# scripts/clean.sh runs `black .` from repo root -- exclude any local venv
+# (whatever it's named) so it never reformats third-party vendored code.
+extend-exclude = '(^|/)(\.?venv[^/]*|env|ENV)(/|$)'
+
+[tool.isort]
+profile = "black"
+# same rationale as [tool.black].extend-exclude above -- isort has no single
+# regex knob, so skip_glob needs both the top-level dir and everything under it.
+skip_glob = [".venv*", "venv*", "env/*", "ENV/*", "*/.venv*/*", "*/venv*/*"]
