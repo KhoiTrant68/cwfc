@@ -41,7 +41,7 @@ from torchvision.transforms import ToTensor
 def list_images(root, max_images=None):
     paths = sorted(
         p
-        for ext in ("*.png", "*.jpg", "*.jpeg")
+        for ext in ("*.png", "*.jpg", "*.jpeg", "*.PNG", "*.JPG", "*.JPEG")
         for p in glob.glob(os.path.join(root, "**", ext), recursive=True)
     )
     if not paths:

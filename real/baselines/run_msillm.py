@@ -78,7 +78,7 @@ def rescale_image(image, back_to_float=True):
 def load_images(data_root, device):
     paths = sorted(
         p
-        for ext in ("*.png", "*.jpg", "*.jpeg")
+        for ext in ("*.png", "*.jpg", "*.jpeg", "*.PNG", "*.JPG", "*.JPEG")
         for p in glob.glob(os.path.join(data_root, ext))
     )
     if not paths:
