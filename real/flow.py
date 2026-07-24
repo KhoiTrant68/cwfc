@@ -133,12 +133,21 @@ class UNetVelocity(nn.Module):
 # ---------------------------------------------------------------------------
 
 
-def build_real_pool(codec, patch_data, npool, device):
+def build_real_pool(codec, patch_data, npool, device, crops_per_image=None):
     """Sample a fixed pool of real patches + their codec condition + a pool
     embedding for kNN. Mirrors g4_wflow.build_pool; `patch_data` is a
-    real/data.PatchFolderDataset (or anything with .sample(n))."""
+    real/data.PatchFolderDataset (or anything with .sample(n)).
+
+    `crops_per_image`, when set, uses `patch_data.sample_grouped` instead of
+    `.sample` -- required for `--same_image_only` to have genuine same-image
+    candidates rather than a mostly-empty mask (see sample_grouped's
+    docstring in real/data.py)."""
     with torch.no_grad():
-        X = patch_data.sample(npool)
+        X = (
+            patch_data.sample_grouped(npool, crops_per_image)
+            if crops_per_image
+            else patch_data.sample(npool)
+        )
         Y = codec.condition(X)
         source_ids = (
             patch_data.last_source_ids()
@@ -351,6 +360,16 @@ def main():
         "(use if real/data.py's sanity_check_knn shows cross-image "
         "neighbours landing on unrelated content)",
     )
+    ap.add_argument(
+        "--crops_per_image",
+        type=int,
+        default=8,
+        help="with --same_image_only, draw the pool as groups of this many "
+        "crops per source image (via PatchFolderDataset.sample_grouped) so "
+        "every anchor actually has same-image candidates -- independent "
+        "per-crop sampling makes same-image collisions rare whenever the "
+        "folder has as many/more images as --npool",
+    )
     ap.add_argument("--steps", type=int, default=3000)
     ap.add_argument(
         "--N", type=int, default=32, help="batch size per step, PER GPU under DDP"
@@ -409,7 +428,13 @@ def main():
     rows = []
     for seed in args.seeds:
         g1.set_seed(seed * 1000 + rank)  # distinct local pool/batches per rank
-        X, Y, source_ids = build_real_pool(codec, data, args.npool, device)
+        X, Y, source_ids = build_real_pool(
+            codec,
+            data,
+            args.npool,
+            device,
+            crops_per_image=args.crops_per_image if args.same_image_only else None,
+        )
         y_shape = tuple(Y.shape[1:])
         embed = g1.make_embed("pool", y_shape, device=device)
         E = embed(Y)

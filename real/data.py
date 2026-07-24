@@ -99,6 +99,42 @@ class PatchFolderDataset:
         self._last_source_ids = torch.tensor(source_ids, device=self.device)
         return torch.stack(crops).to(self.device)
 
+    def sample_grouped(self, n, crops_per_image):
+        """Like `.sample(n)` but drawn as groups of `crops_per_image` crops
+        from the same source image, so every crop has genuine same-image
+        neighbours in the pool.
+
+        `.sample(n)` picks a source image independently at random for each
+        of the n crops; when the number of distinct source images is
+        comparable to or larger than n (true for both CLIC train's ~1.6k
+        images and ImageNet-style folders), same-image collisions across
+        independent draws are Poisson-rare (P(none) ~= exp(-n/n_images)),
+        so most anchors end up with *no* same-image candidate at all. That
+        makes `real/flow.py`'s `--same_image_only` kNN mask degenerate (an
+        all-inf row, so `topk` returns arbitrary unrelated indices) for a
+        large fraction of anchors -- silently reproducing the exact
+        unrelated-neighbour problem `--same_image_only` exists to fix. This
+        grouped sampler is the fallback: only load `n // crops_per_image`
+        images, but draw enough independent crops from each that every
+        anchor's own image is guaranteed to contribute `crops_per_image - 1`
+        other pool members.
+        """
+        n_images = max(1, n // crops_per_image)
+        crops, source_ids = [], []
+        for _ in range(n_images):
+            idx = self._rng.randrange(len(self.paths))
+            img = Image.open(self.paths[idx]).convert("RGB")
+            for _ in range(crops_per_image):
+                crops.append(self.totensor(self._random_crop(img)))
+                source_ids.append(idx)
+        while len(crops) < n:  # top up if crops_per_image doesn't divide n
+            idx = self._rng.randrange(len(self.paths))
+            img = Image.open(self.paths[idx]).convert("RGB")
+            crops.append(self.totensor(self._random_crop(img)))
+            source_ids.append(idx)
+        self._last_source_ids = torch.tensor(source_ids, device=self.device)
+        return torch.stack(crops).to(self.device)
+
     def last_source_ids(self):
         """Source-image index for each crop in the most recent `.sample()`
         call -- same length/order as that call's returned batch."""
