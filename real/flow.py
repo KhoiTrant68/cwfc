@@ -402,6 +402,22 @@ def main():
         device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
     is_main = rank == 0
 
+    if args.same_image_only and args.crops_per_image <= args.knn:
+        # A source image only contributes (crops_per_image - 1) genuine
+        # same-image candidates besides the anchor itself; if knn asks for
+        # more than that, _knn_indices's topk fills the rest from masked
+        # (+inf, tied) entries -- i.e. arbitrary crops, not same-image ones,
+        # silently defeating part of --same_image_only. Keep the invariant
+        # crops_per_image > knn so every requested neighbour is genuine.
+        old = args.crops_per_image
+        args.crops_per_image = args.knn + 1
+        if is_main:
+            print(
+                f"[warn] --crops_per_image={old} <= --knn={args.knn}; bumping "
+                f"--crops_per_image to {args.crops_per_image} so every kNN "
+                f"slot has a genuine same-image candidate"
+            )
+
     if is_main:
         print(
             f"distributed={distributed} world_size={world_size} device={device} "
