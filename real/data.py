@@ -96,7 +96,7 @@ class PatchFolderDataset:
             img = Image.open(self.paths[idx]).convert("RGB")
             crops.append(self.totensor(self._random_crop(img)))
             source_ids.append(idx)
-        self._last_source_ids = torch.tensor(source_ids)
+        self._last_source_ids = torch.tensor(source_ids, device=self.device)
         return torch.stack(crops).to(self.device)
 
     def last_source_ids(self):
