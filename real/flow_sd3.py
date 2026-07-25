@@ -149,7 +149,7 @@ class SD3LatentFlow(nn.Module):
     instead of UNetVelocity.
     """
 
-    def __init__(self, model_id=SD3_MODEL_ID, controlnet_layers=12, device="cuda", dtype=torch.float32):
+    def __init__(self, model_id=SD3_MODEL_ID, controlnet_layers=12, device="cuda", dtype=torch.float32, hf_token=None):
         # dtype defaults to float32 rather than bf16: this file's dtype-cast
         # points (see the `.to(...)` calls below and in train_flow_sd3/
         # sample_flow_sd3) should make bf16 work too, but that combination
@@ -176,7 +176,13 @@ class SD3LatentFlow(nn.Module):
         # precision (`text_encoder_3=None` + a manually-loaded fp16 T5) or
         # calling `pipe.enable_model_cpu_offload()` first; not implemented
         # here since it wasn't reachable to test in this offline environment.
-        pipe = StableDiffusion3Pipeline.from_pretrained(model_id, torch_dtype=dtype)
+        #
+        # NOTE: stabilityai/stable-diffusion-3-medium-diffusers is a *gated*
+        # HF repo -- accept the license at
+        # https://huggingface.co/stabilityai/stable-diffusion-3-medium-diffusers
+        # and pass a token (this arg, or `huggingface_hub.login(token=...)`,
+        # or an HF_TOKEN env var) before this will download successfully.
+        pipe = StableDiffusion3Pipeline.from_pretrained(model_id, torch_dtype=dtype, token=hf_token)
         pipe.to(device)
         with torch.no_grad():
             # VERIFY: encode_prompt's exact positional/keyword signature and
@@ -193,9 +199,11 @@ class SD3LatentFlow(nn.Module):
         torch.cuda.empty_cache()
 
         self.transformer = SD3Transformer2DModel.from_pretrained(
-            model_id, subfolder="transformer", torch_dtype=dtype
+            model_id, subfolder="transformer", torch_dtype=dtype, token=hf_token
         ).to(device)
-        self.vae = AutoencoderKL.from_pretrained(model_id, subfolder="vae", torch_dtype=dtype).to(device)
+        self.vae = AutoencoderKL.from_pretrained(
+            model_id, subfolder="vae", torch_dtype=dtype, token=hf_token
+        ).to(device)
         self.transformer.eval().requires_grad_(False)
         self.vae.eval().requires_grad_(False)
 
@@ -450,6 +458,14 @@ def main():
     ap.add_argument("--train_root", required=True)
     ap.add_argument("--max_images", type=int, default=None)
     ap.add_argument("--model_id", default=SD3_MODEL_ID)
+    ap.add_argument(
+        "--hf_token",
+        default=None,
+        help="Hugging Face access token -- stabilityai/stable-diffusion-3-"
+        "medium-diffusers is gated, accept its license on huggingface.co "
+        "first, then pass a token here (or set HF_TOKEN / run "
+        "huggingface_hub.login() beforehand instead)",
+    )
     ap.add_argument("--controlnet_layers", type=int, default=12)
     ap.add_argument(
         "--dtype",
@@ -497,7 +513,10 @@ def main():
     codec = CompressAICodec(arch=args.arch, quality=args.quality, device=device)
     data = PatchFolderDataset(args.train_root, patch=args.patch, device=device, seed=0, max_images=args.max_images)
     dtype = torch.bfloat16 if args.dtype == "bf16" else torch.float32
-    net = SD3LatentFlow(model_id=args.model_id, controlnet_layers=args.controlnet_layers, device=device, dtype=dtype)
+    net = SD3LatentFlow(
+        model_id=args.model_id, controlnet_layers=args.controlnet_layers,
+        device=device, dtype=dtype, hf_token=args.hf_token,
+    )
     print(
         f"trainable params: controlnet={sum(p.numel() for p in net.controlnet.parameters()):,} "
         f"lambda_mlp={sum(p.numel() for p in net.lambda_mlp.parameters()):,} "
