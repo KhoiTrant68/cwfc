@@ -149,7 +149,21 @@ class SD3LatentFlow(nn.Module):
     instead of UNetVelocity.
     """
 
-    def __init__(self, model_id=SD3_MODEL_ID, controlnet_layers=12, device="cuda", dtype=torch.float32, hf_token=None):
+    def __init__(
+        self,
+        model_id=SD3_MODEL_ID,
+        controlnet_layers=12,
+        device="cuda",
+        dtype=torch.float32,
+        hf_token=None,
+        hf_variant=None,
+    ):
+        # hf_variant="fp16" downloads the repo's fp16-precision *files* (half
+        # the disk footprint -- matters on small container disks; SD3-medium's
+        # T5-XXL text encoder alone is ~19GB at fp32 vs ~9.5GB at fp16 on
+        # disk) independently of `dtype` (the *compute* dtype weights get
+        # cast to once loaded into memory) -- e.g. hf_variant="fp16",
+        # dtype=torch.bfloat16 is a fine combination.
         # dtype defaults to float32 rather than bf16: this file's dtype-cast
         # points (see the `.to(...)` calls below and in train_flow_sd3/
         # sample_flow_sd3) should make bf16 work too, but that combination
@@ -182,7 +196,9 @@ class SD3LatentFlow(nn.Module):
         # https://huggingface.co/stabilityai/stable-diffusion-3-medium-diffusers
         # and pass a token (this arg, or `huggingface_hub.login(token=...)`,
         # or an HF_TOKEN env var) before this will download successfully.
-        pipe = StableDiffusion3Pipeline.from_pretrained(model_id, torch_dtype=dtype, token=hf_token)
+        pipe = StableDiffusion3Pipeline.from_pretrained(
+            model_id, torch_dtype=dtype, token=hf_token, variant=hf_variant
+        )
         pipe.to(device)
         with torch.no_grad():
             # VERIFY: encode_prompt's exact positional/keyword signature and
@@ -199,10 +215,10 @@ class SD3LatentFlow(nn.Module):
         torch.cuda.empty_cache()
 
         self.transformer = SD3Transformer2DModel.from_pretrained(
-            model_id, subfolder="transformer", torch_dtype=dtype, token=hf_token
+            model_id, subfolder="transformer", torch_dtype=dtype, token=hf_token, variant=hf_variant
         ).to(device)
         self.vae = AutoencoderKL.from_pretrained(
-            model_id, subfolder="vae", torch_dtype=dtype, token=hf_token
+            model_id, subfolder="vae", torch_dtype=dtype, token=hf_token, variant=hf_variant
         ).to(device)
         self.transformer.eval().requires_grad_(False)
         self.vae.eval().requires_grad_(False)
@@ -471,10 +487,21 @@ def main():
         "--dtype",
         choices=["fp32", "bf16"],
         default="fp32",
-        help="fp32 is the verified-safe default (see SD3LatentFlow's "
-        "docstring/comment); bf16 halves memory but mixes dtypes across "
-        "the frozen backbone and trainable adapter in a way this offline "
-        "environment couldn't exercise on real hardware",
+        help="compute dtype once weights are loaded. fp32 is the "
+        "verified-safe default (see SD3LatentFlow's docstring/comment); "
+        "bf16 roughly halves activation memory and is faster on "
+        "Ampere/Ada+ tensor cores -- worth using on a GPU with real "
+        "headroom (e.g. RTX 6000 Ada, A100) once the fp32 smoke test has "
+        "confirmed the pipeline is otherwise correct",
+    )
+    ap.add_argument(
+        "--hf_variant",
+        default=None,
+        help="HF repo file variant to download, e.g. 'fp16' -- halves the "
+        "on-*disk* download size independently of --dtype (SD3-medium's "
+        "full-precision files are ~31GB total, dominated by the T5-XXL "
+        "text encoder; matters on small container disks). Set this "
+        "whenever disk space is tighter than ~35GB free",
     )
     ap.add_argument("--arch", default="cheng2020-anchor")
     ap.add_argument("--quality", type=int, default=1)
@@ -515,7 +542,7 @@ def main():
     dtype = torch.bfloat16 if args.dtype == "bf16" else torch.float32
     net = SD3LatentFlow(
         model_id=args.model_id, controlnet_layers=args.controlnet_layers,
-        device=device, dtype=dtype, hf_token=args.hf_token,
+        device=device, dtype=dtype, hf_token=args.hf_token, hf_variant=args.hf_variant,
     )
     print(
         f"trainable params: controlnet={sum(p.numel() for p in net.controlnet.parameters()):,} "

@@ -139,6 +139,10 @@ def main():
         "--hf_token", default=None,
         help="--backbone sd3 only; gated repo, see real/flow_sd3.py --help",
     )
+    ap.add_argument(
+        "--hf_variant", default=None,
+        help="--backbone sd3 only; e.g. 'fp16' to halve on-disk download size",
+    )
     ap.add_argument("--arch", default="cheng2020-anchor")
     ap.add_argument("--quality", type=int, default=1)
     ap.add_argument(
@@ -174,7 +178,7 @@ def main():
         dtype = torch.bfloat16 if args.dtype == "bf16" else torch.float32
         net = SD3LatentFlow(
             model_id=args.model_id, controlnet_layers=args.controlnet_layers,
-            device=device, dtype=dtype, hf_token=args.hf_token,
+            device=device, dtype=dtype, hf_token=args.hf_token, hf_variant=args.hf_variant,
         )
         net.load_trainable(args.checkpoint, map_location=device)
         net.controlnet.eval()
