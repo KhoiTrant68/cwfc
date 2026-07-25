@@ -88,7 +88,13 @@ import torch.nn.functional as F
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import g1_pilot as g1  # noqa: E402  (set_seed, make_embed, mmd_rff)
-from real.flow import _knn_indices, build_real_pool  # noqa: E402  (unchanged mechanism)
+from real.flow import (  # noqa: E402  (unchanged mechanism + DDP helpers)
+    _cleanup_distributed,
+    _is_distributed,
+    _knn_indices,
+    _setup_distributed,
+    build_real_pool,
+)
 
 SD3_MODEL_ID = "stabilityai/stable-diffusion-3-medium-diffusers"
 
@@ -228,9 +234,19 @@ class SD3LatentFlow(nn.Module):
         # a common ControlNet-depth choice (half of SD3-medium's 24 blocks)
         # but check examples/controlnet/train_controlnet_sd3.py's own
         # default/recommendation before a full run.
+        #
+        # from_transformer is a plain constructor-style factory, not a
+        # from_pretrained call -- it has no torch_dtype kwarg, and layers it
+        # initialises fresh (not copied from `self.transformer`, e.g.
+        # pos_embed) default to float32 regardless of what dtype the source
+        # transformer's copied weights are in. `.to(device)` alone only
+        # moves device, not dtype, which crashes the very first conv
+        # (`RuntimeError: Input type (BFloat16) and bias type (float) should
+        # be the same`) as soon as a non-fp32 `dtype` is used. Cast
+        # explicitly here instead of relying on from_transformer/`.to()`.
         self.controlnet = SD3ControlNetModel.from_transformer(
             self.transformer, num_layers=controlnet_layers
-        ).to(device)
+        ).to(device=device, dtype=dtype)
         self.controlnet.train()
 
         pooled_dim = self.transformer.config.pooled_projection_dim
@@ -250,16 +266,24 @@ class SD3LatentFlow(nn.Module):
     def trainable_parameters(self):
         return list(self.controlnet.parameters()) + list(self.lambda_mlp.parameters())
 
+    def _unwrap(self, m):
+        """Strip a DistributedDataParallel wrapper if present, so checkpoints
+        have the same key layout regardless of whether training used DDP
+        (DDP stores the real module under `.module`, which would otherwise
+        add a `module.` prefix to every saved key)."""
+        return m.module if hasattr(m, "module") else m
+
     def save_trainable(self, path):
+        controlnet, lambda_mlp = self._unwrap(self.controlnet), self._unwrap(self.lambda_mlp)
         torch.save(
-            {"controlnet": self.controlnet.state_dict(), "lambda_mlp": self.lambda_mlp.state_dict()},
+            {"controlnet": controlnet.state_dict(), "lambda_mlp": lambda_mlp.state_dict()},
             path,
         )
 
     def load_trainable(self, path, map_location=None):
         ckpt = torch.load(path, map_location=map_location)
-        self.controlnet.load_state_dict(ckpt["controlnet"])
-        self.lambda_mlp.load_state_dict(ckpt["lambda_mlp"])
+        self._unwrap(self.controlnet).load_state_dict(ckpt["controlnet"])
+        self._unwrap(self.lambda_mlp).load_state_dict(ckpt["lambda_mlp"])
 
     @torch.no_grad()
     def encode_pixels(self, x_pixel):
@@ -457,9 +481,16 @@ def evaluate_sd3(net, codec, X, X_latent, Ycond_latent, E, N, lam, n_steps, n_dr
 
 # ---------------------------------------------------------------------------
 # CLI -- same shape as real/flow.py::main() (quality, patch, npool, knn,
-# lams, seeds, save_checkpoint_dir, embed); no DDP here (single-GPU only for
-# now -- add following real/flow.py's _setup_distributed pattern if a
-# multi-GPU run turns out to be necessary for Phase 3's data scale-up).
+# lams, seeds, save_checkpoint_dir, embed), including the same DDP pattern
+# for multi-GPU (torchrun --nproc_per_node=N): each rank builds its OWN
+# local pool (independent .sample() calls, rank offset into the RNG seed)
+# rather than building one pool on rank 0 and broadcasting it -- see
+# real/flow.py's module-level comment for the full rationale. Unlike
+# real/flow.py (which DDP-wraps its single `net` directly), SD3LatentFlow
+# bundles frozen (transformer/vae) and trainable (controlnet/lambda_mlp)
+# submodules behind non-forward() methods (`velocity`, `encode_pixels`, ...),
+# so DDP wraps `net.controlnet`/`net.lambda_mlp` individually instead of the
+# whole wrapper -- see the DDP-wrap block in main() below.
 # ---------------------------------------------------------------------------
 
 
@@ -520,39 +551,74 @@ def main():
     ap.add_argument("--n_draws", type=int, default=4)
     ap.add_argument("--eval_N", type=int, default=16)
     ap.add_argument("--seeds", type=int, nargs="+", default=[0])
-    ap.add_argument("--device", type=str, default="cuda")
+    ap.add_argument("--device", type=str, default=None, help="only used when not launched via torchrun")
     ap.add_argument("--out", type=str, default="results/g4_real_sd3.json")
     ap.add_argument("--save_checkpoint_dir", type=str, default=None)
     args = ap.parse_args()
 
-    device = args.device
+    distributed = _is_distributed()
+    if distributed:
+        rank, world_size, local_rank, device = _setup_distributed()
+    else:
+        rank, world_size, local_rank = 0, 1, 0
+        device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
+    is_main = rank == 0
+
     if args.same_image_only and args.crops_per_image <= args.knn:
         old = args.crops_per_image
         args.crops_per_image = args.knn + 1
-        print(f"[warn] --crops_per_image={old} <= --knn={args.knn}; bumping to {args.crops_per_image}")
+        if is_main:
+            print(f"[warn] --crops_per_image={old} <= --knn={args.knn}; bumping to {args.crops_per_image}")
 
-    print(
-        f"device={device} backbone=sd3({args.model_id}) arch={args.arch} q={args.quality} "
-        f"patch={args.patch} npool={args.npool} knn={args.knn} embed={args.embed} "
-        f"same_image_only={args.same_image_only}"
-    )
+    if is_main:
+        print(
+            f"distributed={distributed} world_size={world_size} device={device} "
+            f"backbone=sd3({args.model_id}) dtype={args.dtype} arch={args.arch} q={args.quality} "
+            f"patch={args.patch} npool={args.npool} knn={args.knn} embed={args.embed} "
+            f"same_image_only={args.same_image_only}"
+        )
 
     codec = CompressAICodec(arch=args.arch, quality=args.quality, device=device)
-    data = PatchFolderDataset(args.train_root, patch=args.patch, device=device, seed=0, max_images=args.max_images)
+    # each rank builds its own local pool from its own RNG seed offset, not
+    # one shared/broadcast pool -- see the DDP comment block above main().
+    data = PatchFolderDataset(args.train_root, patch=args.patch, device=device, seed=rank, max_images=args.max_images)
     dtype = torch.bfloat16 if args.dtype == "bf16" else torch.float32
+
+    # rank 0 downloads/warms the (large, first-run) HF cache before other
+    # ranks start their own from_pretrained calls, avoiding a concurrent-
+    # download race against the same cache directory -- same rationale as
+    # real/flow.py's barrier around the compressai codec download.
+    if distributed and rank != 0:
+        torch.distributed.barrier()
     net = SD3LatentFlow(
         model_id=args.model_id, controlnet_layers=args.controlnet_layers,
         device=device, dtype=dtype, hf_token=args.hf_token, hf_variant=args.hf_variant,
     )
-    print(
-        f"trainable params: controlnet={sum(p.numel() for p in net.controlnet.parameters()):,} "
-        f"lambda_mlp={sum(p.numel() for p in net.lambda_mlp.parameters()):,} "
-        f"(frozen transformer={sum(p.numel() for p in net.transformer.parameters()):,})"
-    )
+    if distributed and rank == 0:
+        torch.distributed.barrier()
+
+    if distributed:
+        # only the trainable submodules need gradient sync; SD3LatentFlow
+        # itself is never called via a single forward() (velocity() invokes
+        # frozen transformer/controlnet calls directly), so DDP wraps these
+        # two submodules individually rather than the whole wrapper -- see
+        # the DDP comment block above main(). net.velocity()'s existing
+        # `self.controlnet(...)`/`self.lambda_mlp(...)` calls work unchanged
+        # against the DDP-wrapped versions (DDP is transparently callable).
+        ddp_kwargs = {"device_ids": [local_rank]} if torch.cuda.is_available() else {}
+        net.controlnet = torch.nn.parallel.DistributedDataParallel(net.controlnet, **ddp_kwargs)
+        net.lambda_mlp = torch.nn.parallel.DistributedDataParallel(net.lambda_mlp, **ddp_kwargs)
+
+    if is_main:
+        print(
+            f"trainable params: controlnet={sum(p.numel() for p in net.controlnet.parameters()):,} "
+            f"lambda_mlp={sum(p.numel() for p in net.lambda_mlp.parameters()):,} "
+            f"(frozen transformer={sum(p.numel() for p in net.transformer.parameters()):,})"
+        )
 
     rows = []
     for seed in args.seeds:
-        g1.set_seed(seed)
+        g1.set_seed(seed * 1000 + rank)  # distinct local pool/batches per rank
         X, Y, X_latent, Ycond_latent, source_ids = build_real_pool_latent(
             net, codec, data, args.npool, device,
             crops_per_image=args.crops_per_image if args.same_image_only else None,
@@ -565,25 +631,29 @@ def main():
             net, X, X_latent, Ycond_latent, E, args.lams, args.steps, args.N, args.knn,
             args.lr, device, args.same_image_only, source_ids, grad_accum=args.grad_accum,
         )
-        print(f"seed={seed} final training loss={loss:.4f}")
+        if is_main:
+            print(f"seed={seed} final training loss={loss:.4f}")
 
-        if args.save_checkpoint_dir:
+        if args.save_checkpoint_dir and is_main:
             os.makedirs(args.save_checkpoint_dir, exist_ok=True)
             ckpt_path = os.path.join(args.save_checkpoint_dir, f"g4_real_sd3_seed{seed}.pt")
             net.save_trainable(ckpt_path)
             print(f"saved checkpoint -> {ckpt_path}")
 
-        print(f"{'lam':>6} {'PSNR_samp':>10} {'PSNR_mmse':>10} {'condMMD':>12} {'Div(Var_z)':>12}")
-        for lam in args.lams:
-            ps, pm, cm, dv = evaluate_sd3(
-                net, codec, X, X_latent, Ycond_latent, E, args.eval_N, lam,
-                args.n_steps, args.n_draws, args.knn, seed, device,
-                args.same_image_only, source_ids,
-            )
-            print(f"{lam:>6.2f} {ps:>10.2f} {pm:>10.2f} {cm:>12.4e} {dv:>12.4e}")
-            rows.append({"seed": seed, "lam": lam, "psnr_sample": ps, "psnr_mmse": pm, "cond_mmd": cm, "div": dv})
+        # eval only on rank 0, against rank 0's own local pool -- other
+        # ranks' pools were only there to diversify training batches.
+        if is_main:
+            print(f"{'lam':>6} {'PSNR_samp':>10} {'PSNR_mmse':>10} {'condMMD':>12} {'Div(Var_z)':>12}")
+            for lam in args.lams:
+                ps, pm, cm, dv = evaluate_sd3(
+                    net, codec, X, X_latent, Ycond_latent, E, args.eval_N, lam,
+                    args.n_steps, args.n_draws, args.knn, seed, device,
+                    args.same_image_only, source_ids,
+                )
+                print(f"{lam:>6.2f} {ps:>10.2f} {pm:>10.2f} {cm:>12.4e} {dv:>12.4e}")
+                rows.append({"seed": seed, "lam": lam, "psnr_sample": ps, "psnr_mmse": pm, "cond_mmd": cm, "div": dv})
 
-    if args.out:
+    if args.out and is_main:
         os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
         payload = {
             "config": {
@@ -594,12 +664,16 @@ def main():
                     "steps", "N", "lams", "seeds",
                 ]
             },
+            "world_size": world_size,
             "y_shape": list(y_shape),
             "frontier": rows,
         }
         with open(args.out, "w") as f:
             json.dump(payload, f, indent=2)
         print(f"\nsaved -> {args.out}")
+
+    if distributed:
+        _cleanup_distributed()
 
 
 if __name__ == "__main__":
