@@ -604,30 +604,31 @@ def main():
     data = PatchFolderDataset(args.train_root, patch=args.patch, device=device, seed=rank, max_images=args.max_images)
     dtype = torch.bfloat16 if args.dtype == "bf16" else torch.float32
 
-    # Deliberately NO barrier around this (unlike real/flow.py's small
-    # compressai codec download): SD3's weights are large enough that a
-    # first-ever download can take many minutes, and an earlier version of
-    # this file that barriered here made rank 1 idle-wait on GPU for that
-    # whole duration -- wasted GPU-hour on a paid box, and it also blew
-    # NCCL's collective timeout outright (both ranks aborted with a 600s
-    # ALLREDUCE timeout). huggingface_hub's own hf_hub_download already
-    # takes a per-file lock, so concurrent from_pretrained calls to the same
-    # repo across ranks on the same machine are safe without an extra
-    # barrier -- let every rank download/build in parallel instead.
-    # Not gated by is_main: every rank does real, potentially slow work here
-    # (each rank loads its own full copy of the backbone), and if one rank
-    # lags the others (network/disk contention from concurrent downloads),
-    # the DDP-wrap step just below blocks on a broadcast collective until
-    # every rank arrives -- silent-except-rank0 logging made that
-    # indistinguishable from a hang. Interleaved multi-process output is
-    # messier but the rank prefix keeps each line attributable.
-    print(f"rank{rank}: loading/downloading SD3 backbone (can take a while on a cold HF cache)...", flush=True)
+    # Rank 0 loads (downloads on a cold cache) first, other ranks wait, then
+    # load from what is now a warm local-disk cache. An earlier version of
+    # this file let every rank download in parallel to avoid idle-GPU wait,
+    # but on a real run that caused rank 1 to lag far behind rank 0
+    # (network/disk contention from two concurrent cold downloads on the
+    # same machine), making total wall-clock time unpredictable and, from
+    # the outside, indistinguishable from a hang. A single rank's cold-cache
+    # load measured ~45s in practice -- short enough that serialising is
+    # cheaper *and* more predictable than fighting over shared bandwidth.
+    # The 60min timeout in real/flow.py's _setup_distributed (raised from
+    # NCCL's ~10min default after this exact barrier caused a timeout abort
+    # on an earlier attempt) covers this comfortably even if a from-scratch
+    # download takes much longer than 45s.
+    if distributed and rank != 0:
+        print(f"rank{rank}: waiting for rank 0 to warm the HF cache...", flush=True)
+        torch.distributed.barrier()
+    print(f"rank{rank}: loading/downloading SD3 backbone...", flush=True)
     _load_t0 = time.time()
     net = SD3LatentFlow(
         model_id=args.model_id, controlnet_layers=args.controlnet_layers,
         device=device, dtype=dtype, hf_token=args.hf_token, hf_variant=args.hf_variant,
     )
     print(f"rank{rank}: backbone loaded in {time.time() - _load_t0:.0f}s", flush=True)
+    if distributed and rank == 0:
+        torch.distributed.barrier()
 
     if distributed:
         # only the trainable submodules need gradient sync; SD3LatentFlow
