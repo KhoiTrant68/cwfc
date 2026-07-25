@@ -34,8 +34,18 @@ resolves it.
   supported by `g4_wflow.py`).
 - Wire `WFlowAdapter` to a real W-Flow checkout to swap the tiny AE + toy flow for
   the full-scale conditional endpoint.
-- **Scale G4 to real images + a published baseline** (in progress, `real/`):
-  swap `TinyAE`/`CondVelocity` for a pretrained `compressai` codec + a U-Net
+- **Scale G4 to real images + a published baseline** (`real/`): swap
+  `TinyAE`/`CondVelocity` for a pretrained `compressai` codec + a U-Net
   conditional flow on Kodak/CLIC, with real bpp and a comparison against
-  MS-ILLM (ICML 2023) on identical metrics. See
+  MS-ILLM (ICML 2023) on identical metrics. **Done** -- mechanism confirmed
+  positive at real resolution, but with a from-scratch U-Net far below
+  MS-ILLM's absolute quality (expected: not enough capacity/data). See
   [`docs/RESULTS_REAL.md`](RESULTS_REAL.md).
+- **Swap the from-scratch U-Net for a pretrained flow-matching backbone**
+  (in progress, `real/flow_sd3.py`): SD3 Medium (flow-matching MMDiT) +
+  ControlNet conditioned on the codec's decode, lambda injected via SD3's
+  pooled-projection pathway, same lambda/kNN retrieval mechanism reused
+  unchanged -- aimed at closing the absolute-quality gap enough to be
+  defensible at CVPR/ICCV/ECCV. See the plan this was built from
+  (`C:\Users\khoit\.claude\plans\piped-enchanting-storm.md`) for the full
+  design and literature positioning (arXiv:2405.16817, arXiv:2606.13366).

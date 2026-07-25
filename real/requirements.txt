@@ -23,3 +23,16 @@ DISTS_pytorch
 torch-fidelity
 fvcore
 tqdm
+
+# SD3-backbone track (real/flow_sd3.py, real/eval.py --backbone sd3): a
+# pretrained flow-matching (rectified-flow) transformer + ControlNet, used to
+# replace the from-scratch UNetVelocity so the G4 lambda/kNN mechanism runs
+# on top of an internet-scale image prior instead of a ~2000-crop pool. Needs
+# a GPU with real headroom (Colab Pro/Pro+, rented A100-class) -- not
+# feasible on Kaggle's free 2xT4 tier for anything beyond a smoke test.
+diffusers>=0.30.0
+transformers
+accelerate
+peft
+sentencepiece
+huggingface_hub

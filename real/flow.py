@@ -370,6 +370,18 @@ def main():
         "per-crop sampling makes same-image collisions rare whenever the "
         "folder has as many/more images as --npool",
     )
+    ap.add_argument(
+        "--embed",
+        type=str,
+        default="pool",
+        help="g1_pilot.make_embed kind for the kNN retrieval embedding: "
+        "'pool' (per-channel spatial average -- fast, but spatially blind, "
+        "the diagnosed cause of tonally-similar-but-content-unrelated cross-"
+        "image kNN matches, see docs/RESULTS_REAL.md) or 'proj<d>' (random "
+        "linear projection of the flattened y_hat, e.g. proj64 -- preserves "
+        "spatial structure, recommended once training data scales beyond a "
+        "--same_image_only-sized pool) or 'raw' (no projection, high-dim)",
+    )
     ap.add_argument("--steps", type=int, default=3000)
     ap.add_argument(
         "--N", type=int, default=32, help="batch size per step, PER GPU under DDP"
@@ -422,7 +434,8 @@ def main():
         print(
             f"distributed={distributed} world_size={world_size} device={device} "
             f"arch={args.arch} q={args.quality} patch={args.patch} "
-            f"npool={args.npool} knn={args.knn} same_image_only={args.same_image_only}"
+            f"npool={args.npool} knn={args.knn} embed={args.embed} "
+            f"same_image_only={args.same_image_only}"
         )
 
     # rank 0 downloads the pretrained codec first so concurrent torch.hub cache
@@ -452,7 +465,7 @@ def main():
             crops_per_image=args.crops_per_image if args.same_image_only else None,
         )
         y_shape = tuple(Y.shape[1:])
-        embed = g1.make_embed("pool", y_shape, device=device)
+        embed = g1.make_embed(args.embed, y_shape, seed=seed, device=device)
         E = embed(Y)
 
         net = UNetVelocity(zc=y_shape[0], ch=args.ch).to(device)
@@ -535,6 +548,7 @@ def main():
                     "patch",
                     "npool",
                     "knn",
+                    "embed",
                     "same_image_only",
                     "steps",
                     "N",

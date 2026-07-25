@@ -8,15 +8,26 @@ under different recipes (Kodak's 24 images are too few for a vanilla FID;
 `update_patch_fid` -- the same patch-FID trick MS-ILLM's own eval script
 uses -- sidesteps that).
 
-UNetVelocity is fully convolutional, so no tiling is needed at eval time:
-Kodak's 768x512 (and most CLIC images) are already divisible by 16, matching
-the codec's downsample factor, so the network trained on `--patch` crops
-just runs directly on the full test image.
+Supports two backbones via `--backbone`, sharing this file's metrics
+pipeline unchanged because both sampling functions share the same
+pixel-space (B,3,H,W) in [0,1] output contract (see `_draw_samples`):
+  * `unet` (default) -- real/flow.py's from-scratch UNetVelocity, fully
+    convolutional so no tiling is needed at eval time: Kodak's 768x512 (and
+    most CLIC images) are already divisible by 16, matching the codec's
+    downsample factor, so the network trained on `--patch` crops just runs
+    directly on the full test image.
+  * `sd3` -- real/flow_sd3.py's pretrained SD3 ControlNet+lambda-adapter
+    backbone (see that file's module docstring for the full design).
 
 Usage (after training with real/flow.py, saving the model's state_dict):
     python real/eval.py --test_root data/kodak --checkpoint ckpt.pt \
         --arch cheng2020-anchor --quality 1 --lams 0 0.25 0.5 0.75 1 \
         --out results/eval_real_kodak.json
+
+Or after training with real/flow_sd3.py:
+    python real/eval.py --test_root data/kodak --backbone sd3 \
+        --checkpoint ckpts/g4_real_sd3_seed0.pt --quality 1 \
+        --lams 0 0.25 0.5 0.75 1 --out results/eval_real_sd3_kodak.json
 """
 
 from __future__ import annotations
@@ -36,8 +47,23 @@ from real.data import load_images
 from real.flow import UNetVelocity, sample_flow
 
 
+def _draw_samples(net, codec, image, lam, n_draws, n_steps, backbone):
+    """Backbone-agnostic sampling: both real/flow.py's sample_flow and
+    real/flow_sd3.py's sample_flow_sd3 share the same output contract
+    (pixel-space (B,3,H,W) in [0,1]), so this is the only branch point
+    needed to score either checkpoint with the rest of this file's metrics
+    pipeline unchanged."""
+    y_hat = codec.condition(image)
+    if backbone == "unet":
+        return torch.stack([sample_flow(net, y_hat, lam, n_steps) for _ in range(n_draws)])
+    from real.flow_sd3 import sample_flow_sd3
+
+    cond_latent = net.encode_pixels(codec.decode(y_hat))
+    return torch.stack([sample_flow_sd3(net, cond_latent, lam, n_steps) for _ in range(n_draws)])
+
+
 @torch.no_grad()
-def eval_lambda(net, codec, test_root, lam, n_draws, n_steps, device):
+def eval_lambda(net, codec, test_root, lam, n_draws, n_steps, device, backbone="unet"):
     _ensure_neuralcompression_on_path()
     from neuralcompression.metrics import (
         MultiscaleStructuralSimilarity,
@@ -55,12 +81,9 @@ def eval_lambda(net, codec, test_root, lam, n_draws, n_steps, device):
 
     bpp_vals, psnr_sample_vals, psnr_mmse_vals, div_vals = [], [], [], []
     for path, image in load_images(test_root, device=device):
-        y_hat = codec.condition(image)
         bpp_vals.append(codec.real_bpp(image))
 
-        draws = torch.stack(
-            [sample_flow(net, y_hat, lam, n_steps) for _ in range(n_draws)]
-        )
+        draws = _draw_samples(net, codec, image, lam, n_draws, n_steps, backbone)
         sample, mmse = draws[0], draws.mean(dim=0)
         div_vals.append(float(draws.flatten(2).var(dim=0).mean()))
 
@@ -95,7 +118,22 @@ def main():
     ap.add_argument(
         "--checkpoint",
         required=True,
-        help="state_dict saved from real/flow.py training",
+        help="state_dict saved from real/flow.py (--backbone unet) or the "
+        "{'controlnet','lambda_mlp'} dict saved by real/flow_sd3.py's "
+        "SD3LatentFlow.save_trainable (--backbone sd3)",
+    )
+    ap.add_argument(
+        "--backbone",
+        choices=["unet", "sd3"],
+        default="unet",
+        help="unet = real/flow.py's from-scratch UNetVelocity; "
+        "sd3 = real/flow_sd3.py's pretrained SD3 ControlNet+lambda-adapter",
+    )
+    ap.add_argument("--model_id", default="stabilityai/stable-diffusion-3-medium-diffusers", help="--backbone sd3 only")
+    ap.add_argument("--controlnet_layers", type=int, default=12, help="--backbone sd3 only")
+    ap.add_argument(
+        "--dtype", choices=["fp32", "bf16"], default="fp32",
+        help="--backbone sd3 only; must match the dtype the checkpoint was trained with",
     )
     ap.add_argument("--arch", default="cheng2020-anchor")
     ap.add_argument("--quality", type=int, default=1)
@@ -103,9 +141,10 @@ def main():
         "--zc",
         type=int,
         default=None,
-        help="y_hat channels; auto-detected from --arch/--quality if omitted",
+        help="y_hat channels; auto-detected from --arch/--quality if omitted "
+        "(--backbone unet only)",
     )
-    ap.add_argument("--ch", type=int, default=64)
+    ap.add_argument("--ch", type=int, default=64, help="--backbone unet only")
     ap.add_argument(
         "--lams", type=float, nargs="+", default=[0.0, 0.25, 0.5, 0.75, 1.0]
     )
@@ -117,13 +156,23 @@ def main():
 
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
     codec = CompressAICodec(arch=args.arch, quality=args.quality, device=device)
-    zc = args.zc
-    if zc is None:
-        with torch.no_grad():
-            zc = codec.condition(torch.rand(1, 3, 256, 256, device=device)).shape[1]
-    net = UNetVelocity(zc=zc, ch=args.ch).to(device)
-    net.load_state_dict(torch.load(args.checkpoint, map_location=device))
-    net.eval()
+    if args.backbone == "unet":
+        zc = args.zc
+        if zc is None:
+            with torch.no_grad():
+                zc = codec.condition(torch.rand(1, 3, 256, 256, device=device)).shape[1]
+        net = UNetVelocity(zc=zc, ch=args.ch).to(device)
+        net.load_state_dict(torch.load(args.checkpoint, map_location=device))
+        net.eval()
+    else:
+        from real.flow_sd3 import SD3LatentFlow
+
+        dtype = torch.bfloat16 if args.dtype == "bf16" else torch.float32
+        net = SD3LatentFlow(
+            model_id=args.model_id, controlnet_layers=args.controlnet_layers, device=device, dtype=dtype
+        )
+        net.load_trainable(args.checkpoint, map_location=device)
+        net.controlnet.eval()
 
     rows = []
     print(
@@ -132,7 +181,7 @@ def main():
     )
     for lam in args.lams:
         row = eval_lambda(
-            net, codec, args.test_root, lam, args.n_draws, args.n_steps, device
+            net, codec, args.test_root, lam, args.n_draws, args.n_steps, device, args.backbone
         )
         print(
             f"{lam:>6.2f} {row['bpp']:>8.4f} {row['psnr_sample']:>10.2f} "
@@ -145,7 +194,8 @@ def main():
     with open(args.out, "w") as f:
         json.dump(
             {
-                "model": "cwfc_g4_real",
+                "model": f"cwfc_g4_real_{args.backbone}",
+                "backbone": args.backbone,
                 "test_root": args.test_root,
                 "checkpoint": args.checkpoint,
                 "frontier": rows,

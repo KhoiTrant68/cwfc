@@ -209,6 +209,14 @@ if __name__ == "__main__":
     ap.add_argument("--patch", type=int, default=256)
     ap.add_argument("--knn", type=int, default=5)
     ap.add_argument("--npool", type=int, default=200)
+    ap.add_argument(
+        "--embed",
+        default="pool",
+        help="g1_pilot.make_embed kind -- 'pool' (spatially blind, default) "
+        "or 'proj<d>' (e.g. proj64, spatially aware); match whatever "
+        "real/flow.py --embed you intend to train with, so this sanity "
+        "check reflects the actual retrieval pool the flow will see",
+    )
     ap.add_argument("--out", default="figs/real_knn_sanity.png")
     ap.add_argument("--device", default="cpu")
     args = ap.parse_args()
@@ -221,7 +229,7 @@ if __name__ == "__main__":
     x0 = ToTensor()(Image.open(list_images(args.image_root)[0]).convert("RGB"))
     x0 = x0[:, : args.patch, : args.patch].unsqueeze(0).to(args.device)
     y_shape = tuple(codec.condition(x0).shape[1:])
-    embed = g1.make_embed("pool", y_shape, device=args.device)
+    embed = g1.make_embed(args.embed, y_shape, device=args.device)
 
     sanity_check_knn(
         args.image_root,
