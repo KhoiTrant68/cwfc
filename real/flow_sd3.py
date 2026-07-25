@@ -630,6 +630,20 @@ def main():
     if distributed and rank == 0:
         torch.distributed.barrier()
 
+    # Diagnostic, every rank (not is_main-gated): a prior run hit
+    # "DDP expects same model across all ranks, but Rank 0 has 374 params,
+    # while rank 1 has inconsistent 0 params" -- i.e. one rank's controlnet
+    # ended up with zero registered nn.Parameters despite loading without a
+    # visible error, which DDP's own param-shape-verification collective
+    # (inside the DistributedDataParallel(...) call below) is what actually
+    # caught. Printed per-rank so the next run's log shows the real
+    # per-process state *before* DDP gets involved, to bisect whether this
+    # is a from_transformer/.to(dtype=...) issue on the affected rank's own
+    # construction, or something in the DDP wrap itself.
+    n_params = sum(1 for _ in net.controlnet.parameters())
+    n_elems = sum(p.numel() for p in net.controlnet.parameters())
+    print(f"rank{rank}: controlnet has {n_params} parameter tensors, {n_elems:,} elements", flush=True)
+
     if distributed:
         # only the trainable submodules need gradient sync; SD3LatentFlow
         # itself is never called via a single forward() (velocity() invokes
