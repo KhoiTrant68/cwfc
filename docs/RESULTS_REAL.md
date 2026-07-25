@@ -51,21 +51,34 @@ the actual CLIC train pool (richer and much larger than the 24-image Kodak
 set used to first notice this) before deciding which mode to train with, and
 report here which was used and why.
 
-**Mode used: `--same_image_only --crops_per_image 8`.** A first
-`--same_image_only` run (without grouped sampling) made PSNR *worse*
-(~9-10.5dB vs. ~12dB unrestricted). Diagnosis: `PatchFolderDataset.sample()`
-picks a source image independently at random per crop, so with `npool`
-comparable to the number of distinct source images, most anchors end up with
-*no* same-image candidate in the pool at all, and the `--same_image_only` kNN
-mask degenerates to an all-`inf` row (`topk` then returns arbitrary unrelated
-indices) — silently reproducing the exact unrelated-neighbour problem the
-flag exists to fix, for a large fraction of anchors. Fixed by adding
-`PatchFolderDataset.sample_grouped()` (`real/data.py`) plus a
-`--crops_per_image` flag: the pool is drawn as groups of 8 crops per source
-image so every anchor has genuine same-image candidates. After the fix,
-`--same_image_only` gives a clean monotonic frontier on held-out Kodak images
-(see Results below), confirming the fallback works once the pool actually
-contains same-image crops to restrict to.
+**Mode used: `--same_image_only`, `crops_per_image` auto-bumped to `knn + 1 =
+17`.** Two compounding bugs surfaced getting here, both in
+`PatchFolderDataset`/`real/flow.py`, not in the data source:
+
+1. A first `--same_image_only` run (without grouped sampling) made PSNR
+   *worse* (~9-10.5dB vs. ~12dB unrestricted). Diagnosis:
+   `PatchFolderDataset.sample()` picks a source image independently at random
+   per crop, so with `npool` comparable to the number of distinct source
+   images, most anchors end up with *no* same-image candidate in the pool at
+   all, and the `--same_image_only` kNN mask degenerates to an all-`inf` row
+   (`topk` then returns arbitrary unrelated indices) — silently reproducing
+   the exact unrelated-neighbour problem the flag exists to fix. Fixed by
+   adding `PatchFolderDataset.sample_grouped()` (`real/data.py`) plus a
+   `--crops_per_image` flag: the pool is drawn as groups of crops per source
+   image so every anchor has genuine same-image candidates.
+2. Even with that fix, the CLI default `--crops_per_image 8` was still
+   smaller than the default `--knn 16`: each anchor only had
+   `crops_per_image - 1 = 7` genuine same-image neighbours, so `topk(16)`
+   still padded out 9 of its 16 picks with arbitrary tied-`inf` indices —
+   partially defeating fix #1. Fixed with a guard clause in
+   `real/flow.py::main()` that auto-bumps `crops_per_image` to `knn + 1`
+   whenever `--same_image_only` is set and the invariant is violated
+   (prints a `[warn]` line so the run stays reproducible/auditable).
+
+After both fixes, `--same_image_only` gives a clean monotonic frontier on
+held-out Kodak images (see Results below), confirming the fallback works
+once every anchor genuinely has `knn` real same-image candidates to pick
+from.
 
 ## Reproduce
 
@@ -83,10 +96,11 @@ python real/data.py --image_root data/clic/train --out figs/real_knn_sanity.png
 
 # train (single λ-conditioned model; see real/flow.py --help for the full
 # argument list — arch/quality, patch, npool, knn, steps, lams, seeds).
-# --same_image_only --crops_per_image 8 is the mode that produced the
-# Results below (see "A real finding from building this pipeline" above).
+# --same_image_only is the mode that produced the Results below (see "A real
+# finding from building this pipeline" above); crops_per_image auto-bumps to
+# knn+1 if you don't pass one large enough yourself.
 python real/flow.py --train_root data/clic/train --quality 1 \
-  --patch 128 --npool 2000 --knn 16 --same_image_only --crops_per_image 8 \
+  --patch 128 --npool 2000 --knn 16 --same_image_only \
   --lams 0 0.25 0.5 0.75 1 --save_checkpoint_dir ckpts \
   --out results/g4_real_train.json
 
@@ -127,29 +141,30 @@ report here once the run completes.
 ## Results
 
 CWFC G4, trained on CLIC train (`--quality 1 --patch 128 --npool 2000 --knn 16
---same_image_only --crops_per_image 8`), evaluated on full Kodak images
-(`real/eval.py`, `--n_draws 8 --n_steps 20`):
+--same_image_only`, `crops_per_image` auto-bumped to 17), evaluated on full
+Kodak images (`real/eval.py`, `--n_draws 8 --n_steps 20`):
 
 | λ | bpp | PSNR_sample | PSNR_mmse | MS-SSIM | LPIPS | FID | Var_z |
 |---|---|---|---|---|---|---|---|
-| 0.00 | 0.1196 | 12.35 | 13.92 | 0.1761 | 0.8939 | 365.60 | 2.0629e-02 |
-| 0.25 | 0.1196 | 12.86 | 13.98 | 0.2120 | 0.9181 | 376.81 | 1.1946e-02 |
-| 0.50 | 0.1196 | 13.18 | 13.97 | 0.2422 | 0.9585 | 389.20 | 7.4305e-03 |
-| 0.75 | 0.1196 | 13.41 | 13.94 | 0.2702 | 1.0020 | 392.85 | 5.3060e-03 |
-| 1.00 | 0.1196 | 13.51 | 13.89 | 0.2857 | 1.0127 | 403.15 | 4.4460e-03 |
+| 0.00 | 0.1196 | 12.48 | 13.85 | 0.1759 | 0.9148 | 380.92 | 1.6992e-02 |
+| 0.25 | 0.1196 | 13.10 | 13.99 | 0.2166 | 0.9452 | 403.81 | 1.1121e-02 |
+| 0.50 | 0.1196 | 13.27 | 14.03 | 0.2387 | 0.9661 | 430.38 | 8.1880e-03 |
+| 0.75 | 0.1196 | 13.48 | 14.07 | 0.2548 | 0.9750 | 440.99 | 6.6644e-03 |
+| 1.00 | 0.1196 | 13.56 | 14.17 | 0.2640 | 0.9798 | 450.01 | 5.7394e-03 |
 
 All four axes move monotonically with λ in the predicted direction:
-`PSNR_sample` ↑ 12.35→13.51 dB, `Var_z` ↓ 4.6× (2.06e-2→4.45e-3), `LPIPS` ↑
-0.894→1.013, `FID` ↑ 365.6→403.2 — cleaner than the CIFAR reference (no
-plateau/dip at λ=1). **G4 verdict: POSITIVE at real resolution.**
+`PSNR_sample` ↑ 12.48→13.56 dB, `Var_z` ↓ 3.0× (1.70e-2→5.74e-3), `LPIPS` ↑
+0.915→0.980, `FID` ↑ 380.9→450.0 — no plateau/dip at any λ, cleaner than the
+CIFAR reference. **G4 verdict: POSITIVE at real resolution.**
 
 MS-ILLM comparison point (bracketing CWFC's bpp=0.1196): quality=2
 (target bpp=0.07, bpp=0.0809): PSNR=25.92, LPIPS=0.110, FID=71.73; quality=3
 (target bpp=0.14, bpp=0.1535): PSNR=27.53, LPIPS=0.073, FID=49.79. At a
 matched rate, CWFC sits **well below** MS-ILLM's rate-distortion-perception
-curve on every metric (PSNR ~12-14dB lower, LPIPS/FID 5-8x worse). Expected
-given the scale gap: CWFC here is a from-scratch U-Net trained on a ~250-image
-pool with a deliberately weak (`quality=1`) frozen codec, vs. MS-ILLM's
-large-scale pretrained model — the point of this track is reproducing the
-G4 distortion-perception mechanism at real resolution, not matching MS-ILLM's
-absolute operating point.
+curve on every metric (PSNR ~12-15dB lower, LPIPS ~9-11x worse, FID ~6-9x
+worse). Expected given the scale gap: CWFC here is a from-scratch U-Net
+trained on a ~117-image pool (17 crops/image × ~117 images, per the
+`--same_image_only` invariant above) with a deliberately weak (`quality=1`)
+frozen codec, vs. MS-ILLM's large-scale pretrained model — the point of this
+track is reproducing the G4 distortion-perception mechanism at real
+resolution, not matching MS-ILLM's absolute operating point.
