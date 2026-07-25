@@ -363,18 +363,29 @@ def train_flow_sd3(
     same_image_only=False,
     source_ids=None,
     grad_accum=1,
+    is_main=True,
+    log_every=5,
 ):
     """X/X_latent/Ycond_latent are the pool's pixel crops / VAE latents of
     those crops / VAE latents of the codec's decoded reconstruction --
     precomputed once by `build_real_pool_latent` below, mirroring
     real/flow.py's train_flow signature (X, Y, E, ...) with the extra
     *_latent tensors standing in for pixel-space X/Y where the flow math
-    itself runs (see module docstring's sigma-convention note)."""
+    itself runs (see module docstring's sigma-convention note).
+
+    Unlike real/flow.py's train_flow (fast enough per-step that only the
+    final loss is worth printing), this prints every `log_every` steps: SD3
+    is heavy enough (a 50-step run with a large batch/patch can take many
+    minutes) that silence until the very end is indistinguishable from a
+    hang -- exactly what happened on the first real multi-GPU run."""
+    import time
+
     opt = torch.optim.AdamW(net.trainable_parameters(), lr=lr)
     net.controlnet.train()
     Np = X_latent.shape[0]
     lams_t = torch.tensor(lams, device=device)
     last_loss = 0.0
+    t0 = time.time()
     opt.zero_grad()
     for step in range(steps):
         idx = torch.randint(0, Np, (N,), device=device)
@@ -408,6 +419,14 @@ def train_flow_sd3(
             opt.step()
             opt.zero_grad()
         last_loss = float(loss.detach()) * grad_accum
+        if is_main and (step == 0 or (step + 1) % log_every == 0 or step + 1 == steps):
+            elapsed = time.time() - t0
+            rate = (step + 1) / elapsed
+            eta = (steps - step - 1) / rate if rate > 0 else float("inf")
+            print(
+                f"  step {step + 1:>5}/{steps} loss={last_loss:.4f} "
+                f"{rate:.2f} it/s elapsed={elapsed:.0f}s eta={eta:.0f}s"
+            )
     if steps % grad_accum != 0:
         opt.step()  # flush any accumulated grads from a partial final batch
         opt.zero_grad()
@@ -497,6 +516,7 @@ def evaluate_sd3(net, codec, X, X_latent, Ycond_latent, E, N, lam, n_steps, n_dr
 def main():
     import argparse
     import json
+    import time
 
     from real.codec import CompressAICodec
     from real.data import PatchFolderDataset
@@ -594,10 +614,15 @@ def main():
     # takes a per-file lock, so concurrent from_pretrained calls to the same
     # repo across ranks on the same machine are safe without an extra
     # barrier -- let every rank download/build in parallel instead.
+    if is_main:
+        print(f"rank{rank}: loading/downloading SD3 backbone (can take a while on a cold HF cache)...")
+    _load_t0 = time.time()
     net = SD3LatentFlow(
         model_id=args.model_id, controlnet_layers=args.controlnet_layers,
         device=device, dtype=dtype, hf_token=args.hf_token, hf_variant=args.hf_variant,
     )
+    if is_main:
+        print(f"rank{rank}: backbone loaded in {time.time() - _load_t0:.0f}s")
 
     if distributed:
         # only the trainable submodules need gradient sync; SD3LatentFlow
@@ -621,10 +646,15 @@ def main():
     rows = []
     for seed in args.seeds:
         g1.set_seed(seed * 1000 + rank)  # distinct local pool/batches per rank
+        if is_main:
+            print(f"seed={seed}: building pool (npool={args.npool}, VAE-encoding in batches)...")
+        _pool_t0 = time.time()
         X, Y, X_latent, Ycond_latent, source_ids = build_real_pool_latent(
             net, codec, data, args.npool, device,
             crops_per_image=args.crops_per_image if args.same_image_only else None,
         )
+        if is_main:
+            print(f"seed={seed}: pool built in {time.time() - _pool_t0:.0f}s, starting training...")
         y_shape = tuple(Y.shape[1:])
         embed = g1.make_embed(args.embed, y_shape, seed=seed, device=device)
         E = embed(Y)
@@ -632,6 +662,7 @@ def main():
         loss = train_flow_sd3(
             net, X, X_latent, Ycond_latent, E, args.lams, args.steps, args.N, args.knn,
             args.lr, device, args.same_image_only, source_ids, grad_accum=args.grad_accum,
+            is_main=is_main,
         )
         if is_main:
             print(f"seed={seed} final training loss={loss:.4f}")
