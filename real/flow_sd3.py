@@ -614,15 +614,20 @@ def main():
     # takes a per-file lock, so concurrent from_pretrained calls to the same
     # repo across ranks on the same machine are safe without an extra
     # barrier -- let every rank download/build in parallel instead.
-    if is_main:
-        print(f"rank{rank}: loading/downloading SD3 backbone (can take a while on a cold HF cache)...")
+    # Not gated by is_main: every rank does real, potentially slow work here
+    # (each rank loads its own full copy of the backbone), and if one rank
+    # lags the others (network/disk contention from concurrent downloads),
+    # the DDP-wrap step just below blocks on a broadcast collective until
+    # every rank arrives -- silent-except-rank0 logging made that
+    # indistinguishable from a hang. Interleaved multi-process output is
+    # messier but the rank prefix keeps each line attributable.
+    print(f"rank{rank}: loading/downloading SD3 backbone (can take a while on a cold HF cache)...", flush=True)
     _load_t0 = time.time()
     net = SD3LatentFlow(
         model_id=args.model_id, controlnet_layers=args.controlnet_layers,
         device=device, dtype=dtype, hf_token=args.hf_token, hf_variant=args.hf_variant,
     )
-    if is_main:
-        print(f"rank{rank}: backbone loaded in {time.time() - _load_t0:.0f}s")
+    print(f"rank{rank}: backbone loaded in {time.time() - _load_t0:.0f}s", flush=True)
 
     if distributed:
         # only the trainable submodules need gradient sync; SD3LatentFlow
@@ -632,9 +637,20 @@ def main():
         # the DDP comment block above main(). net.velocity()'s existing
         # `self.controlnet(...)`/`self.lambda_mlp(...)` calls work unchanged
         # against the DDP-wrapped versions (DDP is transparently callable).
+        #
+        # NOTE: DistributedDataParallel's constructor itself broadcasts
+        # initial parameters from rank 0 to every other rank -- an implicit
+        # collective, so this line blocks until *every* rank reaches it,
+        # same as an explicit barrier would. A rank lagging behind on the
+        # (unbarriered, intentionally parallel) backbone load above is the
+        # most likely reason to see rank 0 sitting here without moving on.
+        if is_main:
+            print("waiting for all ranks to finish loading before DDP-wrapping...", flush=True)
         ddp_kwargs = {"device_ids": [local_rank]} if torch.cuda.is_available() else {}
         net.controlnet = torch.nn.parallel.DistributedDataParallel(net.controlnet, **ddp_kwargs)
         net.lambda_mlp = torch.nn.parallel.DistributedDataParallel(net.lambda_mlp, **ddp_kwargs)
+        if is_main:
+            print("all ranks ready.", flush=True)
 
     if is_main:
         print(
