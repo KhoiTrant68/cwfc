@@ -300,18 +300,33 @@ def _is_distributed():
     return int(os.environ.get("WORLD_SIZE", "1")) > 1
 
 
-def _setup_distributed():
+def _setup_distributed(timeout_minutes=60):
+    """timeout_minutes defaults generously (NCCL's own default is 10min for
+    some PyTorch versions) because real/flow_sd3.py's first-ever run can
+    spend many minutes just downloading pretrained weights before any rank
+    reaches a collective op -- a real/flow_sd3.py run hit exactly this,
+    timing out and aborting both ranks. device_id is passed to
+    init_process_group (not set via torch.cuda.set_device after, as this
+    function previously did) so NCCL knows the rank->GPU mapping before the
+    first collective, per PyTorch's own "using GPU N as device used by this
+    process is currently unknown" warning."""
+    import datetime
+
     import torch.distributed as dist
 
     backend = "nccl" if torch.cuda.is_available() else "gloo"
-    dist.init_process_group(backend=backend)
-    rank, world_size = dist.get_rank(), dist.get_world_size()
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    device_id = None
     if torch.cuda.is_available():
         torch.cuda.set_device(local_rank)
-        device = f"cuda:{local_rank}"
-    else:
-        device = "cpu"
+        device_id = torch.device(f"cuda:{local_rank}")
+    dist.init_process_group(
+        backend=backend,
+        timeout=datetime.timedelta(minutes=timeout_minutes),
+        device_id=device_id,
+    )
+    rank, world_size = dist.get_rank(), dist.get_world_size()
+    device = f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu"
     return rank, world_size, local_rank, device
 
 

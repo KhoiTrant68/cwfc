@@ -584,18 +584,20 @@ def main():
     data = PatchFolderDataset(args.train_root, patch=args.patch, device=device, seed=rank, max_images=args.max_images)
     dtype = torch.bfloat16 if args.dtype == "bf16" else torch.float32
 
-    # rank 0 downloads/warms the (large, first-run) HF cache before other
-    # ranks start their own from_pretrained calls, avoiding a concurrent-
-    # download race against the same cache directory -- same rationale as
-    # real/flow.py's barrier around the compressai codec download.
-    if distributed and rank != 0:
-        torch.distributed.barrier()
+    # Deliberately NO barrier around this (unlike real/flow.py's small
+    # compressai codec download): SD3's weights are large enough that a
+    # first-ever download can take many minutes, and an earlier version of
+    # this file that barriered here made rank 1 idle-wait on GPU for that
+    # whole duration -- wasted GPU-hour on a paid box, and it also blew
+    # NCCL's collective timeout outright (both ranks aborted with a 600s
+    # ALLREDUCE timeout). huggingface_hub's own hf_hub_download already
+    # takes a per-file lock, so concurrent from_pretrained calls to the same
+    # repo across ranks on the same machine are safe without an extra
+    # barrier -- let every rank download/build in parallel instead.
     net = SD3LatentFlow(
         model_id=args.model_id, controlnet_layers=args.controlnet_layers,
         device=device, dtype=dtype, hf_token=args.hf_token, hf_variant=args.hf_variant,
     )
-    if distributed and rank == 0:
-        torch.distributed.barrier()
 
     if distributed:
         # only the trainable submodules need gradient sync; SD3LatentFlow
