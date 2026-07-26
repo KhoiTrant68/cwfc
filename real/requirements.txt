@@ -38,7 +38,14 @@ tqdm
 # `import diffusers` entirely before any of our code runs. 0.31.0 predates
 # that module and still has full SD3ControlNetModel support (added 0.29.2).
 diffusers==0.31.0
-transformers
+#
+# transformers also pinned: recent releases refactored checkpoint loading
+# to go through core_model_loading/sharding_utils, which imports DTensor
+# from torch.distributed.tensor (the newer public location) -- on torch
+# builds where DTensor still lives under the older torch.distributed._tensor
+# path, that import fails before any model code runs. 4.44.2 predates that
+# refactor and is a well-tested pairing with diffusers 0.31.0 for SD3.
+transformers==4.44.2
 accelerate
 peft
 sentencepiece
