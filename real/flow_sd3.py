@@ -488,7 +488,11 @@ def evaluate_sd3(net, codec, X, X_latent, Ycond_latent, E, N, lam, n_steps, n_dr
     Np = X.shape[0]
     idx = torch.randint(0, Np, (N,), device=device)
     cond, x_true = Ycond_latent[idx], X[idx]
-    draws = torch.stack([sample_flow_sd3(net, cond, lam, n_steps) for _ in range(n_draws)])
+    # .float(): draws come back in net.dtype (e.g. bf16); torch.cdist (used
+    # inside g1.mmd_rff below) has no CUDA kernel for bf16
+    # ("cdist_cuda" not implemented for 'BFloat16'), so eval-time metrics
+    # need fp32 regardless of what dtype training itself ran in.
+    draws = torch.stack([sample_flow_sd3(net, cond, lam, n_steps) for _ in range(n_draws)]).float()
     one, mmse = draws[0], draws.mean(dim=0)
     mse_s = float((one - x_true).pow(2).mean())
     mse_m = float((mmse - x_true).pow(2).mean())

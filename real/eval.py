@@ -59,7 +59,12 @@ def _draw_samples(net, codec, image, lam, n_draws, n_steps, backbone):
     from real.flow_sd3 import sample_flow_sd3
 
     cond_latent = net.encode_pixels(codec.decode(y_hat))
-    return torch.stack([sample_flow_sd3(net, cond_latent, lam, n_steps) for _ in range(n_draws)])
+    # .float(): sd3's draws come back in net.dtype (e.g. bf16); torchmetrics'
+    # MS-SSIM/LPIPS/FID and torch.cdist-based metrics below have no bf16 CUDA
+    # kernel support, so this needs fp32 regardless of what dtype training ran in.
+    return torch.stack(
+        [sample_flow_sd3(net, cond_latent, lam, n_steps) for _ in range(n_draws)]
+    ).float()
 
 
 @torch.no_grad()
