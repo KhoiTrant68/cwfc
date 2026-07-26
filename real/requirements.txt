@@ -31,13 +31,21 @@ tqdm
 # a GPU with real headroom (Colab Pro/Pro+, rented A100-class) -- not
 # feasible on Kaggle's free 2xT4 tier for anything beyond a smoke test.
 #
-# Pinned (not >=): newer diffusers releases added attention_dispatch.py,
-# which registers a FlashAttention-3 custom op at import time via
-# torch._library.custom_op; on many torch builds that registration itself
-# raises (infer_schema ValueError on the op's own signature), breaking
-# `import diffusers` entirely before any of our code runs. 0.31.0 predates
-# that module and still has full SD3ControlNetModel support (added 0.29.2).
-diffusers==0.31.0
+# Pinned (not >=), and not 0.31.0 either (tried first, see below):
+# - Newer diffusers releases (roughly 0.33+, alongside the ACE-Step audio
+#   model) added attention_dispatch.py, which registers a FlashAttention-3
+#   custom op at import time via torch._library.custom_op; on many torch
+#   builds that registration itself raises (infer_schema ValueError on the
+#   op's own signature), breaking `import diffusers` before any of our code
+#   runs. 0.32.2 predates that module.
+# - 0.31.0 (SD3.5's release) added `dual_attention_layers` to
+#   SD3Transformer2DModel's config but SD3ControlNetModel.__init__ wasn't
+#   updated in that same release to accept it; from_transformer() copies the
+#   transformer's full config into `cls(**config)`, so building a ControlNet
+#   from a plain SD3-medium transformer (dual_attention_layers=() but still
+#   present as a key) raises `TypeError: unexpected keyword argument
+#   'dual_attention_layers'` regardless of checkpoint. Fixed by 0.32.2.
+diffusers==0.32.2
 #
 # transformers also pinned: recent releases refactored checkpoint loading
 # to go through core_model_loading/sharding_utils, which imports DTensor
