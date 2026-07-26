@@ -58,6 +58,7 @@ accelerate==0.34.2
 sentencepiece==0.2.0
 huggingface_hub==0.25.2
 tokenizers==0.19.1
+protobuf==4.25.5
 # NOTE: peft intentionally omitted -- nothing under real/ imports it (this
 # repo trains SD3ControlNetModel directly, not a LoRA adapter); an unpinned
 # peft was one more resolver-conflict surface for no functional benefit.
