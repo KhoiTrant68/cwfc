@@ -229,11 +229,12 @@ class SD3LatentFlow(nn.Module):
         self.transformer.eval().requires_grad_(False)
         self.vae.eval().requires_grad_(False)
 
-        # VERIFY: from_transformer's exact kwargs (num_layers vs num_control
-        # layers) against the installed diffusers version; num_layers=12 is
-        # a common ControlNet-depth choice (half of SD3-medium's 24 blocks)
-        # but check examples/controlnet/train_controlnet_sd3.py's own
-        # default/recommendation before a full run.
+        # num_layers=12 (a common ControlNet-depth choice, half of
+        # SD3-medium's 24 blocks) -- construction itself succeeds against the
+        # installed diffusers version; num_extra_conditioning_channels below
+        # is the other from_transformer kwarg that mattered in practice (see
+        # its own comment -- the default silently sized pos_embed_input for
+        # a conditioning input we don't use).
         #
         # from_transformer is a plain constructor-style factory, not a
         # from_pretrained call -- it has no torch_dtype kwarg, and layers it
@@ -244,8 +245,15 @@ class SD3LatentFlow(nn.Module):
         # (`RuntimeError: Input type (BFloat16) and bias type (float) should
         # be the same`) as soon as a non-fp32 `dtype` is used. Cast
         # explicitly here instead of relying on from_transformer/`.to()`.
+        # num_extra_conditioning_channels=0: from_transformer's own default
+        # is 1, matching StabilityAI's released canny-style ControlNet whose
+        # conditioning input is 16 VAE-latent channels + 1 extra channel.
+        # Our conditioning input (net.encode_pixels(codec.decode(y_hat))) is
+        # a plain VAE latent with no extra channel, so pos_embed_input must
+        # be sized for 16 in_channels, not 17, or the very first ControlNet
+        # conv raises a channel-count mismatch against cond_latent.
         self.controlnet = SD3ControlNetModel.from_transformer(
-            self.transformer, num_layers=controlnet_layers
+            self.transformer, num_layers=controlnet_layers, num_extra_conditioning_channels=0
         ).to(device=device, dtype=dtype)
         self.controlnet.train()
 
