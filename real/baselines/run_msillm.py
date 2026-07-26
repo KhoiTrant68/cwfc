@@ -52,16 +52,17 @@ def _ensure_neuralcompression_on_path():
     hub cache but does not leave `neuralcompression` importable afterwards —
     a plain `pip install` of the repo fails in many environments (it pulls an
     old pinned scipy that needs a meson/cython toolchain to build). Point
-    sys.path at the already-cloned cache dir instead; torch.hub.load must run
-    at least once first so the clone exists.
+    sys.path at the already-cloned cache dir instead.
     """
     hub_dir = torch.hub.get_dir()
     matches = glob.glob(os.path.join(hub_dir, "facebookresearch_NeuralCompression_*"))
     if not matches:
-        raise RuntimeError(
-            "NeuralCompression not found in torch hub cache — call "
-            "torch.hub.load('facebookresearch/NeuralCompression', ...) first."
-        )
+        # Resolving any model name clones the repo into the hub cache as a
+        # side effect -- trigger that here so callers (real/eval.py in
+        # particular, which never runs run_msillm.py's own main() first)
+        # work on a fresh torch hub cache without a separate priming step.
+        torch.hub.load("facebookresearch/NeuralCompression", "msillm_quality_1")
+        matches = glob.glob(os.path.join(hub_dir, "facebookresearch_NeuralCompression_*"))
     path = matches[0]
     if path not in sys.path:
         sys.path.insert(0, path)
