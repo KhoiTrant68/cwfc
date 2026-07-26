@@ -20,5 +20,5 @@ torchvision
 # script only ever calls AutoencoderKL.from_pretrained. If real/requirements.txt
 # is also installed in this environment, transformers==4.44.2 from there
 # satisfies this; otherwise install a compatible transformers alongside it.
-diffusers==0.31.0      # --backbone vae
+diffusers==0.32.2      # --backbone vae
 lpips          # --percep lpips
