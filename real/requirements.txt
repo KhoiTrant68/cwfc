@@ -46,7 +46,18 @@ diffusers==0.31.0
 # path, that import fails before any model code runs. 4.44.2 predates that
 # refactor and is a well-tested pairing with diffusers 0.31.0 for SD3.
 transformers==4.44.2
-accelerate
-peft
-sentencepiece
-huggingface_hub
+#
+# The rest of this block is pinned together as one known-working set for the
+# diffusers==0.31.0 / transformers==4.44.2 pair above -- leaving any one of
+# these unpinned lets pip's resolver pull today's latest release of just
+# that package, which is exactly how the last few rounds of import errors
+# happened (each fix pinned the package that had just broken, while the
+# next-newest unpinned one broke next). Bump this whole block together, not
+# one line at a time, if a future diffusers/transformers upgrade is needed.
+accelerate==0.34.2
+sentencepiece==0.2.0
+huggingface_hub==0.25.2
+tokenizers==0.19.1
+# NOTE: peft intentionally omitted -- nothing under real/ imports it (this
+# repo trains SD3ControlNetModel directly, not a LoRA adapter); an unpinned
+# peft was one more resolver-conflict surface for no functional benefit.
