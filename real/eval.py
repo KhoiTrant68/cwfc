@@ -44,17 +44,25 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)) + "/..")
 from real.baselines.run_msillm import _ensure_neuralcompression_on_path, rescale_image
 from real.codec import CompressAICodec
 from real.data import load_images
-from real.flow import UNetVelocity, sample_flow
+from real.flow import UNetVelocity, sample_flow, sample_flow_residual
 
 
-def _draw_samples(net, codec, image, lam, n_draws, n_steps, backbone):
-    """Backbone-agnostic sampling: both real/flow.py's sample_flow and
-    real/flow_sd3.py's sample_flow_sd3 share the same output contract
+def _draw_samples(net, codec, image, lam, n_draws, n_steps, backbone, target="knn"):
+    """Backbone-agnostic sampling: both real/flow.py's sample_flow(_residual)
+    and real/flow_sd3.py's sample_flow_sd3 share the same output contract
     (pixel-space (B,3,H,W) in [0,1]), so this is the only branch point
     needed to score either checkpoint with the rest of this file's metrics
-    pipeline unchanged."""
+    pipeline unchanged. `target` only matters for backbone=="unet": it must
+    match whichever target (--target knn|residual) the checkpoint was
+    trained with in real/flow.py, since a residual-trained net's output is
+    a velocity in residual space, not pixel space (see real/flow.py's
+    module docstring)."""
     y_hat = codec.condition(image)
     if backbone == "unet":
+        if target == "residual":
+            return torch.stack(
+                [sample_flow_residual(net, codec, y_hat, lam, n_steps) for _ in range(n_draws)]
+            )
         return torch.stack([sample_flow(net, y_hat, lam, n_steps) for _ in range(n_draws)])
     from real.flow_sd3 import sample_flow_sd3
 
@@ -68,7 +76,7 @@ def _draw_samples(net, codec, image, lam, n_draws, n_steps, backbone):
 
 
 @torch.no_grad()
-def eval_lambda(net, codec, test_root, lam, n_draws, n_steps, device, backbone="unet"):
+def eval_lambda(net, codec, test_root, lam, n_draws, n_steps, device, backbone="unet", target="knn"):
     _ensure_neuralcompression_on_path()
     from neuralcompression.metrics import (
         MultiscaleStructuralSimilarity,
@@ -88,7 +96,7 @@ def eval_lambda(net, codec, test_root, lam, n_draws, n_steps, device, backbone="
     for path, image in load_images(test_root, device=device):
         bpp_vals.append(codec.real_bpp(image))
 
-        draws = _draw_samples(net, codec, image, lam, n_draws, n_steps, backbone)
+        draws = _draw_samples(net, codec, image, lam, n_draws, n_steps, backbone, target)
         sample, mmse = draws[0], draws.mean(dim=0)
         div_vals.append(float(draws.flatten(2).var(dim=0).mean()))
 
@@ -159,6 +167,16 @@ def main():
     )
     ap.add_argument("--ch", type=int, default=64, help="--backbone unet only")
     ap.add_argument(
+        "--target",
+        choices=["knn", "residual"],
+        default="knn",
+        help="--backbone unet only; must match whichever --target the "
+        "checkpoint was trained with in real/flow.py -- a residual-trained "
+        "net's raw output is a velocity in residual space (x-decode(y_hat)), "
+        "not pixel space, so using the wrong sampler here silently produces "
+        "garbage rather than an error",
+    )
+    ap.add_argument(
         "--lams", type=float, nargs="+", default=[0.0, 0.25, 0.5, 0.75, 1.0]
     )
     ap.add_argument("--n_draws", type=int, default=8)
@@ -195,7 +213,8 @@ def main():
     )
     for lam in args.lams:
         row = eval_lambda(
-            net, codec, args.test_root, lam, args.n_draws, args.n_steps, device, args.backbone
+            net, codec, args.test_root, lam, args.n_draws, args.n_steps, device,
+            args.backbone, args.target,
         )
         print(
             f"{lam:>6.2f} {row['bpp']:>8.4f} {row['psnr_sample']:>10.2f} "
@@ -210,6 +229,7 @@ def main():
             {
                 "model": f"cwfc_g4_real_{args.backbone}",
                 "backbone": args.backbone,
+                "target": args.target,
                 "test_root": args.test_root,
                 "checkpoint": args.checkpoint,
                 "frontier": rows,

@@ -23,6 +23,23 @@ Everything else -- the rectified-flow loss (x_t=(1-t)x0+t*x1, regress
 x1-x0), the Euler sampler, the kNN-conditional-target construction, the
 Var_z/PSNR/MMD/conditional-MMD metrics -- is resolution-independent and is
 reused from g1_pilot / g4_wflow rather than reimplemented.
+
+--target {knn,residual} (see main()'s CLI, default "knn" for backward
+compatibility with the Reproduce steps in docs/RESULTS_REAL.md): the kNN
+path above is the original mechanism, kept as an ablation -- a full-Kodak
+eval of it (SD3 backbone, real/flow_sd3.py) showed Div/LPIPS moving
+monotonically with lambda but PSNR flat/noisy against held-out test images,
+because a kNN-pool-mean is not actually the MMSE reconstruction of any
+specific test image, just an average of retrieved training neighbours.
+"residual" replaces the retrieval-based target with a real conditional pair
+straight from the data: x1(lam) = (1-lam)*x + lam*decode(y_hat), where x is
+the true patch and decode(y_hat) is the codec's own (deterministic) MMSE-ish
+reconstruction of its own condition -- no retrieval, no pool. The flow
+itself regresses on the residual r = x - decode(y_hat) rather than on x
+directly, so lam=1's target is r1=0: the lam=1 floor is exactly
+decode(y_hat)'s own PSNR by construction, and training only has to learn
+r1=0 there instead of reconstructing a plausible image from scratch. See
+train_flow_residual / sample_flow_residual / evaluate_residual below.
 """
 
 from __future__ import annotations
@@ -34,6 +51,7 @@ import sys
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.distributions import Beta
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import g1_pilot as g1  # noqa: E402  (set_seed, make_embed, mmd_rff)
@@ -277,6 +295,102 @@ def evaluate(
 
 
 # ---------------------------------------------------------------------------
+# --target residual: no-retrieval MMSE-anchor target (see module docstring).
+# No fixed pool needed -- every step draws a fresh batch straight from
+# `data` (real/data.py's PatchFolderDataset loads lazily from disk), so
+# training data coverage is the whole folder, not a --npool-sized subset.
+# ---------------------------------------------------------------------------
+
+
+def train_flow_residual(net, codec, data, steps, N, lr, device, lam_dist="beta", lpips_weight=0.0):
+    """lam_dist='beta' samples lam~Beta(0.5,0.5) (mass at both endpoints,
+    where the frontier is hardest to learn and where the paper's claims are
+    measured) instead of uniform. lpips_weight>0 adds a small perceptual
+    term on the flow's own one-step x0-estimate, weighted down as lam->1 so
+    it never fights the MMSE anchor there (Nhom 3.2)."""
+    opt = torch.optim.Adam(net.parameters(), lr=lr)
+    net.train()
+    lpips_fn = None
+    if lpips_weight > 0:
+        import lpips as lpips_lib
+
+        lpips_fn = lpips_lib.LPIPS(net="alex").to(device).eval()
+        for p in lpips_fn.parameters():
+            p.requires_grad_(False)
+
+    loss = torch.tensor(0.0)
+    for _ in range(steps):
+        x = data.sample(N)
+        with torch.no_grad():
+            y_hat = codec.condition(x)
+            x_dec = codec.decode(y_hat)
+            r_target = x - x_dec
+            if lam_dist == "beta":
+                lam = Beta(0.5, 0.5).sample((N,)).to(device)
+            else:
+                lam = torch.rand(N, device=device)
+            lam_b = lam.view(N, 1, 1, 1)
+            r1 = (1.0 - lam_b) * r_target
+            r0 = torch.randn_like(r1)
+            t = torch.rand(N, 1, 1, 1, device=device)
+            rt = (1.0 - t) * r0 + t * r1
+            target = r1 - r0
+        v = net(rt, t, y_hat, lam_b)
+        loss = F.mse_loss(v, target)
+        if lpips_fn is not None:
+            x0_hat = (rt + (1.0 - t) * v + x_dec).clamp(0.0, 1.0)
+            w = 0.05 * (1.0 - lam_b).mean()
+            loss = loss + w * lpips_fn(x0_hat * 2 - 1, x * 2 - 1).mean()
+        opt.zero_grad()
+        loss.backward()
+        opt.step()
+    net.eval()
+    return float(loss.detach())
+
+
+@torch.no_grad()
+def sample_flow_residual(net, codec, y_hat, lam, n_steps=20, r0=None):
+    """Euler-integrates the residual r=x-decode(y_hat) instead of x itself,
+    then adds the codec's own decode back at the end -- the lam=1 floor is
+    exactly decode(y_hat)'s PSNR by construction (see module docstring),
+    not something the network has to reconstruct from scratch."""
+    x_dec = codec.decode(y_hat)
+    B, _, h, w = y_hat.shape
+    H, W = h * 16, w * 16  # matches UNetVelocity's 4-stage / 16x downsample
+    if r0 is None:
+        r0 = torch.randn(B, 3, H, W, device=y_hat.device)
+    r = r0
+    dt = 1.0 / n_steps
+    for i in range(n_steps):
+        t = torch.full((B, 1, 1, 1), i * dt, device=y_hat.device)
+        r = r + dt * net(r, t, y_hat, lam)
+    return (x_dec + r).clamp(0.0, 1.0)
+
+
+@torch.no_grad()
+def evaluate_residual(net, codec, data, N, lam, n_steps, n_draws, seed, device, lpips_fn=None):
+    """LPIPS replaces condMMD here: with no retrieval pool, there is no
+    "real neighbour set" to compare draws against, so this measures
+    perceptual distance to the ground-truth patch directly instead --
+    standard axis, and the one docs/RESULTS_REAL.md's pass/fail criterion
+    itself is stated in terms of."""
+    g1.set_seed(seed + 1)
+    x_true = data.sample(N)
+    y_hat = codec.condition(x_true)
+    draws = torch.stack(
+        [sample_flow_residual(net, codec, y_hat, lam, n_steps) for _ in range(n_draws)]
+    )
+    one, mmse = draws[0], draws.mean(dim=0)
+    mse_s = float((one - x_true).pow(2).mean().clamp(min=1e-12))
+    mse_m = float((mmse - x_true).pow(2).mean().clamp(min=1e-12))
+    psnr_sample = -10 * math.log10(mse_s)
+    psnr_mmse = -10 * math.log10(mse_m)
+    div = float(draws.flatten(2).var(dim=0).mean())
+    lpips_val = float(lpips_fn(one * 2 - 1, x_true * 2 - 1).mean()) if lpips_fn is not None else None
+    return psnr_sample, psnr_mmse, div, lpips_val
+
+
+# ---------------------------------------------------------------------------
 # Multi-GPU (DDP) -- launch with torchrun, e.g. on Kaggle's 2xT4:
 #   torchrun --standalone --nproc_per_node=2 real/flow.py --train_root ...
 # Plain `python real/flow.py ...` (no torchrun) still works unchanged: WORLD_SIZE
@@ -366,36 +480,63 @@ def main():
     ap.add_argument("--arch", default="cheng2020-anchor")
     ap.add_argument("--quality", type=int, default=1)
     ap.add_argument("--patch", type=int, default=256)
-    ap.add_argument("--npool", type=int, default=2000)
-    ap.add_argument("--knn", type=int, default=16)
+    ap.add_argument(
+        "--target",
+        choices=["knn", "residual"],
+        default="knn",
+        help="'knn' (default, back-compat with docs/RESULTS_REAL.md's "
+        "Reproduce steps) = original kNN-retrieval target; 'residual' = "
+        "no-retrieval MMSE-anchor target on the residual x-decode(y_hat), "
+        "see module docstring. --npool/--knn/--same_image_only/"
+        "--crops_per_image/--embed below are --target knn only",
+    )
+    ap.add_argument(
+        "--lam_dist",
+        choices=["uniform", "beta"],
+        default="beta",
+        help="--target residual only: lam sampling distribution during "
+        "training. 'beta' = Beta(0.5,0.5), mass at both endpoints where the "
+        "frontier is hardest to learn and where claims get measured",
+    )
+    ap.add_argument(
+        "--lpips_weight",
+        type=float,
+        default=0.0,
+        help="--target residual only: weight on an auxiliary LPIPS "
+        "term (downweighted as lam->1), 0 disables it (no perceptual loss "
+        "by default, keeps the residual path's cost near-zero)",
+    )
+    ap.add_argument("--npool", type=int, default=2000, help="--target knn only")
+    ap.add_argument("--knn", type=int, default=16, help="--target knn only")
     ap.add_argument(
         "--same_image_only",
         action="store_true",
-        help="restrict kNN targets to crops of the same source photo "
-        "(use if real/data.py's sanity_check_knn shows cross-image "
-        "neighbours landing on unrelated content)",
+        help="--target knn only. restrict kNN targets to crops of the same "
+        "source photo (use if real/data.py's sanity_check_knn shows cross-"
+        "image neighbours landing on unrelated content)",
     )
     ap.add_argument(
         "--crops_per_image",
         type=int,
         default=8,
-        help="with --same_image_only, draw the pool as groups of this many "
-        "crops per source image (via PatchFolderDataset.sample_grouped) so "
-        "every anchor actually has same-image candidates -- independent "
-        "per-crop sampling makes same-image collisions rare whenever the "
-        "folder has as many/more images as --npool",
+        help="--target knn only, with --same_image_only: draw the pool as "
+        "groups of this many crops per source image (via "
+        "PatchFolderDataset.sample_grouped) so every anchor actually has "
+        "same-image candidates -- independent per-crop sampling makes "
+        "same-image collisions rare whenever the folder has as many/more "
+        "images as --npool",
     )
     ap.add_argument(
         "--embed",
         type=str,
         default="pool",
-        help="g1_pilot.make_embed kind for the kNN retrieval embedding: "
-        "'pool' (per-channel spatial average -- fast, but spatially blind, "
-        "the diagnosed cause of tonally-similar-but-content-unrelated cross-"
-        "image kNN matches, see docs/RESULTS_REAL.md) or 'proj<d>' (random "
-        "linear projection of the flattened y_hat, e.g. proj64 -- preserves "
-        "spatial structure, recommended once training data scales beyond a "
-        "--same_image_only-sized pool) or 'raw' (no projection, high-dim)",
+        help="--target knn only. g1_pilot.make_embed kind for the kNN "
+        "retrieval embedding: 'pool' (per-channel spatial average -- fast, "
+        "but spatially blind, the diagnosed cause of tonally-similar-but-"
+        "content-unrelated cross-image kNN matches, see "
+        "docs/RESULTS_REAL.md) or 'proj<d>' (random linear projection of "
+        "the flattened y_hat, e.g. proj64 -- preserves spatial structure) "
+        "or 'raw' (no projection, high-dim)",
     )
     ap.add_argument("--steps", type=int, default=3000)
     ap.add_argument(
@@ -472,16 +613,22 @@ def main():
     rows = []
     for seed in args.seeds:
         g1.set_seed(seed * 1000 + rank)  # distinct local pool/batches per rank
-        X, Y, source_ids = build_real_pool(
-            codec,
-            data,
-            args.npool,
-            device,
-            crops_per_image=args.crops_per_image if args.same_image_only else None,
-        )
-        y_shape = tuple(Y.shape[1:])
-        embed = g1.make_embed(args.embed, y_shape, seed=seed, device=device)
-        E = embed(Y)
+
+        if args.target == "knn":
+            X, Y, source_ids = build_real_pool(
+                codec,
+                data,
+                args.npool,
+                device,
+                crops_per_image=args.crops_per_image if args.same_image_only else None,
+            )
+            y_shape = tuple(Y.shape[1:])
+            embed = g1.make_embed(args.embed, y_shape, seed=seed, device=device)
+            E = embed(Y)
+        else:
+            # residual target needs no fixed pool -- just the y_hat channel
+            # count, from a single probe crop (see module docstring).
+            y_shape = tuple(codec.condition(data.sample(1)).shape[1:])
 
         net = UNetVelocity(zc=y_shape[0], ch=args.ch).to(device)
         if distributed:
@@ -489,20 +636,27 @@ def main():
                 {"device_ids": [local_rank]} if torch.cuda.is_available() else {}
             )
             net = torch.nn.parallel.DistributedDataParallel(net, **ddp_kwargs)
-        loss = train_flow(
-            net,
-            X,
-            Y,
-            E,
-            args.lams,
-            args.steps,
-            args.N,
-            args.knn,
-            args.lr,
-            device,
-            args.same_image_only,
-            source_ids,
-        )
+
+        if args.target == "knn":
+            loss = train_flow(
+                net,
+                X,
+                Y,
+                E,
+                args.lams,
+                args.steps,
+                args.N,
+                args.knn,
+                args.lr,
+                device,
+                args.same_image_only,
+                source_ids,
+            )
+        else:
+            loss = train_flow_residual(
+                net, codec, data, args.steps, args.N, args.lr, device,
+                args.lam_dist, args.lpips_weight,
+            )
         raw_net = net.module if distributed else net  # unwrap DDP for save/eval
         if is_main:
             print(
@@ -517,7 +671,7 @@ def main():
 
         # eval only on rank 0, against rank 0's own local pool -- other ranks'
         # pools were only there to diversify training batches, not to be scored
-        if is_main:
+        if is_main and args.target == "knn":
             print(
                 f"{'lam':>6} {'PSNR_samp':>10} {'PSNR_mmse':>10} {'condMMD':>12} {'Div(Var_z)':>12}"
             )
@@ -549,6 +703,29 @@ def main():
                         "div": dv,
                     }
                 )
+        elif is_main:
+            import lpips as lpips_lib
+
+            lpips_fn = lpips_lib.LPIPS(net="alex").to(device).eval()
+            print(
+                f"{'lam':>6} {'PSNR_samp':>10} {'PSNR_mmse':>10} {'LPIPS':>10} {'Div(Var_z)':>12}"
+            )
+            for lam in args.lams:
+                ps, pm, dv, lp = evaluate_residual(
+                    raw_net, codec, data, args.eval_N, lam, args.n_steps,
+                    args.n_draws, seed, device, lpips_fn,
+                )
+                print(f"{lam:>6.2f} {ps:>10.2f} {pm:>10.2f} {lp:>10.4f} {dv:>12.4e}")
+                rows.append(
+                    {
+                        "seed": seed,
+                        "lam": lam,
+                        "psnr_sample": ps,
+                        "psnr_mmse": pm,
+                        "lpips": lp,
+                        "div": dv,
+                    }
+                )
 
     if args.out and is_main:
         os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
@@ -561,10 +738,13 @@ def main():
                     "arch",
                     "quality",
                     "patch",
+                    "target",
                     "npool",
                     "knn",
                     "embed",
                     "same_image_only",
+                    "lam_dist",
+                    "lpips_weight",
                     "steps",
                     "N",
                     "lams",
