@@ -1,18 +1,28 @@
 #!/usr/bin/env python
 """
-Visual sample grid for a trained real/flow.py checkpoint -- shows the
-original, the codec's own decode(y_hat) (the lam=1 floor by construction
-under --target residual, see real/flow.py's module docstring), and flow
-samples across a handful of lambda values, with multiple independent draws
-at lambda<1 so posterior diversity can be eyeballed directly instead of
-read off aggregate metrics (PSNR/LPIPS/Div) only. Complements
-real/viz_real.py (which plots the bpp/PSNR/LPIPS curves, not images).
+Visual sample grid for a trained real/flow.py or real/flow_sd3.py checkpoint
+-- shows the original, the codec's own decode(y_hat) (the lam=1 floor by
+construction under --target residual), and flow samples across a handful of
+lambda values, with multiple independent draws at lambda<1 so posterior
+diversity can be eyeballed directly instead of read off aggregate metrics
+(PSNR/LPIPS/Div) only. Complements real/viz_real.py (which plots the
+bpp/PSNR/LPIPS curves, not images).
 
-Usage:
+Both backbones share this file: sampling branches on --backbone exactly as
+real/eval.py's _draw_samples does (unet -> sample_flow[_residual],
+sd3 -> sample_flow_sd3 on the VAE latent of codec.decode(y_hat)).
+
+Usage (from-scratch UNet):
     python real/viz_samples.py --test_root data/kodak \
         --checkpoint ckpts/g4_real_seed0.pt --target residual \
         --lams 0 0.5 1 --n_draws 2 --n_images 4 \
         --out figs/samples_residual.png
+
+Usage (SD3 backbone -- pass --crop to keep the per-cell VAE decode cheap):
+    python real/viz_samples.py --test_root data/kodak --backbone sd3 \
+        --checkpoint ckpts/g4_real_sd3_seed0.pt --dtype bf16 --crop 512 \
+        --lams 0 0.5 1 --n_draws 2 --n_images 4 \
+        --out figs/samples_sd3_residual.png
 """
 
 from __future__ import annotations
@@ -49,10 +59,28 @@ def main():
         "reflects generalization, not memorization",
     )
     ap.add_argument("--checkpoint", required=True)
-    ap.add_argument("--target", choices=["knn", "residual"], default="residual")
+    ap.add_argument(
+        "--backbone", choices=["unet", "sd3"], default="unet",
+        help="unet = real/flow.py's UNetVelocity; sd3 = real/flow_sd3.py's "
+        "SD3 ControlNet+lambda-adapter",
+    )
+    ap.add_argument(
+        "--target", choices=["knn", "residual"], default="residual",
+        help="--backbone unet only; sd3 uses the same sample_flow_sd3 sampler "
+        "for both targets (only training differed)",
+    )
     ap.add_argument("--arch", default="cheng2020-anchor")
     ap.add_argument("--quality", type=int, default=1)
-    ap.add_argument("--ch", type=int, default=64)
+    ap.add_argument("--ch", type=int, default=64, help="--backbone unet only")
+    # --backbone sd3 only (mirror real/eval.py's SD3 loader args):
+    ap.add_argument("--model_id", default="stabilityai/stable-diffusion-3-medium-diffusers", help="--backbone sd3 only")
+    ap.add_argument("--controlnet_layers", type=int, default=12, help="--backbone sd3 only")
+    ap.add_argument(
+        "--dtype", choices=["fp32", "bf16"], default="fp32",
+        help="--backbone sd3 only; must match the checkpoint's training dtype",
+    )
+    ap.add_argument("--hf_token", default=None, help="--backbone sd3 only; gated repo")
+    ap.add_argument("--hf_variant", default=None, help="--backbone sd3 only; e.g. 'fp16'")
     ap.add_argument("--lams", type=float, nargs="+", default=[0.0, 0.5, 1.0])
     ap.add_argument(
         "--n_draws", type=int, default=2,
@@ -73,11 +101,22 @@ def main():
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
     codec = CompressAICodec(arch=args.arch, quality=args.quality, device=device)
 
-    with torch.no_grad():
-        zc = codec.condition(torch.rand(1, 3, 256, 256, device=device)).shape[1]
-    net = UNetVelocity(zc=zc, ch=args.ch).to(device)
-    net.load_state_dict(torch.load(args.checkpoint, map_location=device))
-    net.eval()
+    if args.backbone == "unet":
+        with torch.no_grad():
+            zc = codec.condition(torch.rand(1, 3, 256, 256, device=device)).shape[1]
+        net = UNetVelocity(zc=zc, ch=args.ch).to(device)
+        net.load_state_dict(torch.load(args.checkpoint, map_location=device))
+        net.eval()
+    else:
+        from real.flow_sd3 import SD3LatentFlow, sample_flow_sd3
+
+        dtype = torch.bfloat16 if args.dtype == "bf16" else torch.float32
+        net = SD3LatentFlow(
+            model_id=args.model_id, controlnet_layers=args.controlnet_layers,
+            device=device, dtype=dtype, hf_token=args.hf_token, hf_variant=args.hf_variant,
+        )
+        net.load_trainable(args.checkpoint, map_location=device)
+        net.controlnet.eval()
 
     paths = list_images(args.test_root)[: args.n_images]
     totensor = ToTensor()
@@ -115,11 +154,17 @@ def main():
             y_hat = codec.condition(img)
             x_dec = codec.decode(y_hat)
 
+        if args.backbone == "sd3":
+            with torch.no_grad():
+                cond_latent = net.encode_pixels(x_dec)
+
         row_imgs = [img[0], x_dec[0]]
         for lam, d in col_specs[2:]:
             torch.manual_seed(1000 * r + 17 * d + int(lam * 1000))
             with torch.no_grad():
-                if args.target == "residual":
+                if args.backbone == "sd3":
+                    out = sample_flow_sd3(net, cond_latent, lam, args.n_steps).float()
+                elif args.target == "residual":
                     out = sample_flow_residual(net, codec, y_hat, lam, args.n_steps)
                 else:
                     out = sample_flow(net, y_hat, lam, args.n_steps)
