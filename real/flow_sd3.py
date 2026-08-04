@@ -53,6 +53,23 @@ WHAT'S NEW:
     the lambda-MLP are trained. Checkpoints therefore only save those two
     submodules (`save_trainable`/`load_trainable`), not the frozen backbone.
 
+--target {knn,residual} (default "knn", back-compat): "knn" is the original
+retrieval target above. "residual" drops retrieval entirely -- the flow's
+data endpoint becomes x1(lam) = (1-lam)*x_latent + lam*x_dec_latent, where
+x_latent is the true crop's VAE latent and x_dec_latent is the codec's own
+decode(y_hat) in latent space (= the ControlNet conditioning, already
+computed as Ycond_latent). This lifts real/flow.py's residual/MMSE-anchor
+target into SD3's latent space, but generating the FULL blended latent (on
+the prior's natural-image manifold) rather than a latent residual (off it),
+so the pretrained prior is used the way it was trained. lam=1 decodes to
+~codec.decode(y_hat) (the decode floor) by construction; lam=0 to the true
+image. Motivation: real/flow.py's from-scratch UNet under the residual
+target collapsed to the conditional mean -- reconstructions worse than the
+decode floor, no posterior diversity, no lambda effect -- because a small
+backbone cannot represent the conditional distribution; the whole point here
+is to test whether the pretrained prior supplies exactly that. See
+train_flow_sd3_residual / evaluate_sd3_residual.
+
 SIGMA / VELOCITY-SIGN CONVENTION -- read before touching the math below:
 real/flow.py uses x0=noise, x1=data, t: 0->1 (noise->data),
 xt=(1-t)x0+t*x1, target=x1-x0 (velocity points noise->data).
@@ -442,6 +459,84 @@ def train_flow_sd3(
     return last_loss
 
 
+def train_flow_sd3_residual(
+    net: SD3LatentFlow,
+    X_latent,
+    Ycond_latent,
+    steps,
+    N,
+    lr,
+    device,
+    lam_dist="beta",
+    grad_accum=1,
+    is_main=True,
+    log_every=5,
+):
+    """--target residual on the SD3 backbone (no retrieval). The flow's data
+    endpoint is x1(lam) = (1-lam)*X_latent[idx] + lam*Ycond_latent[idx],
+    i.e. blend the true crop's VAE latent toward the codec-decode latent
+    (the MMSE anchor, already precomputed as the ControlNet conditioning) as
+    lam->1 -- real/flow.py's residual/MMSE-anchor target lifted into latent
+    space (see module docstring). Unlike train_flow_sd3 there is no kNN pick:
+    each condition has a single true target, and diversity is meant to come
+    from the frozen prior, not from a retrieval set.
+
+    lam_dist='beta' samples lam~Beta(0.5,0.5) (mass at the endpoints where
+    the frontier is measured); 'uniform' samples lam~U[0,1]. Everything else
+    (sigma convention, target=x0-x1, grad-accum, per-step logging) is
+    identical to train_flow_sd3."""
+    import time
+    from torch.distributions import Beta
+
+    opt = torch.optim.AdamW(net.trainable_parameters(), lr=lr)
+    net.controlnet.train()
+    Np = X_latent.shape[0]
+    last_loss = 0.0
+    t0 = time.time()
+    opt.zero_grad()
+    for step in range(steps):
+        idx = torch.randint(0, Np, (N,), device=device)
+        cond = Ycond_latent[idx]
+        with torch.no_grad():
+            x_samp = X_latent[idx]  # true crop latent (lam=0 endpoint)
+            x_mean = Ycond_latent[idx]  # codec decode latent = MMSE anchor (lam=1)
+            if lam_dist == "beta":
+                lam = Beta(0.5, 0.5).sample((N,)).to(device)
+            else:
+                lam = torch.rand(N, device=device)
+            # same dtype-cast reasoning as train_flow_sd3's lam_b/sigma_b casts.
+            lam_b = lam.view(N, 1, 1, 1).to(x_samp.dtype)
+            x1 = (1.0 - lam_b) * x_samp + lam_b * x_mean
+
+            # SD3's own convention (data->noise), see module docstring.
+            x0 = torch.randn_like(x1)
+            sigma = torch.rand(N, device=device)
+            sigma_b = sigma.view(N, 1, 1, 1).to(x1.dtype)
+            xt = (1.0 - sigma_b) * x1 + sigma_b * x0
+            target = x0 - x1
+
+        v = net.velocity(xt, sigma, cond, lam)
+        loss = F.mse_loss(v.float(), target.float()) / grad_accum
+        loss.backward()
+        if (step + 1) % grad_accum == 0:
+            opt.step()
+            opt.zero_grad()
+        last_loss = float(loss.detach()) * grad_accum
+        if is_main and (step == 0 or (step + 1) % log_every == 0 or step + 1 == steps):
+            elapsed = time.time() - t0
+            rate = (step + 1) / elapsed
+            eta = (steps - step - 1) / rate if rate > 0 else float("inf")
+            print(
+                f"  step {step + 1:>5}/{steps} loss={last_loss:.4f} "
+                f"{rate:.2f} it/s elapsed={elapsed:.0f}s eta={eta:.0f}s"
+            )
+    if steps % grad_accum != 0:
+        opt.step()  # flush any accumulated grads from a partial final batch
+        opt.zero_grad()
+    net.controlnet.eval()
+    return last_loss
+
+
 @torch.no_grad()
 def sample_flow_sd3(net: SD3LatentFlow, cond_latent, lam, n_steps=20, x0=None):
     """cond_latent: (B,16,h,w) VAE latent of the codec's decoded
@@ -510,6 +605,35 @@ def evaluate_sd3(net, codec, X, X_latent, Ycond_latent, E, N, lam, n_steps, n_dr
     return psnr_sample, psnr_mmse, cmmd, div
 
 
+@torch.no_grad()
+def evaluate_sd3_residual(net, codec, X, Y, Ycond_latent, N, lam, n_steps, n_draws, seed, device, lpips_fn=None):
+    """--target residual eval: no retrieval pool, so LPIPS to the ground-truth
+    crop replaces condMMD, and PSNR of codec.decode(y_hat) -- the decode floor
+    the flow must BEAT to add value -- is reported alongside. Same columns as
+    real/flow.py::evaluate_residual, so the SD3 row drops straight into the
+    from-scratch-vs-SD3 ablation table."""
+    g1.set_seed(seed + 1)
+    Np = X.shape[0]
+    idx = torch.randint(0, Np, (N,), device=device)
+    cond, x_true = Ycond_latent[idx], X[idx]
+    # decode floor: the codec's own reconstruction of y_hat, the reference the
+    # flow must beat (psnr_sample < psnr_decode => the flow adds noise, not
+    # detail -- the exact failure real/flow.py's UNet showed). Constant in lam.
+    x_dec = codec.decode(Y[idx])
+    mse_d = float((x_dec - x_true).pow(2).mean().clamp(min=1e-12))
+    psnr_decode = -10 * math.log10(mse_d)
+    # .float() for the same bf16-metric-kernel reason as evaluate_sd3.
+    draws = torch.stack([sample_flow_sd3(net, cond, lam, n_steps) for _ in range(n_draws)]).float()
+    one, mmse = draws[0], draws.mean(dim=0)
+    mse_s = float((one - x_true).pow(2).mean().clamp(min=1e-12))
+    mse_m = float((mmse - x_true).pow(2).mean().clamp(min=1e-12))
+    psnr_sample = -10 * math.log10(mse_s)
+    psnr_mmse = -10 * math.log10(mse_m)
+    div = float(draws.flatten(2).var(dim=0).mean())
+    lpips_val = float(lpips_fn(one * 2 - 1, x_true * 2 - 1).mean()) if lpips_fn is not None else None
+    return psnr_sample, psnr_mmse, psnr_decode, div, lpips_val
+
+
 # ---------------------------------------------------------------------------
 # CLI -- same shape as real/flow.py::main() (quality, patch, npool, knn,
 # lams, seeds, save_checkpoint_dir, embed), including the same DDP pattern
@@ -569,6 +693,22 @@ def main():
     ap.add_argument("--arch", default="cheng2020-anchor")
     ap.add_argument("--quality", type=int, default=1)
     ap.add_argument("--patch", type=int, default=256)
+    ap.add_argument(
+        "--target",
+        choices=["knn", "residual"],
+        default="knn",
+        help="'knn' = original retrieval target; 'residual' = no-retrieval "
+        "MMSE-anchor target x1(lam)=(1-lam)*x_latent+lam*decode(y_hat)_latent "
+        "(see module docstring). --npool/--knn/--embed/--same_image_only/"
+        "--crops_per_image below are --target knn only",
+    )
+    ap.add_argument(
+        "--lam_dist",
+        choices=["uniform", "beta"],
+        default="beta",
+        help="--target residual only: lam sampling distribution. 'beta' = "
+        "Beta(0.5,0.5), mass at both endpoints where the frontier is measured",
+    )
     ap.add_argument("--npool", type=int, default=2000)
     ap.add_argument("--knn", type=int, default=16)
     ap.add_argument("--embed", type=str, default="proj64")
@@ -687,6 +827,7 @@ def main():
         )
 
     rows = []
+    lpips_fn = None  # lazy-loaded for --target residual eval only
     for seed in args.seeds:
         g1.set_seed(seed * 1000 + rank)  # distinct local pool/batches per rank
         if is_main:
@@ -694,19 +835,29 @@ def main():
         _pool_t0 = time.time()
         X, Y, X_latent, Ycond_latent, source_ids = build_real_pool_latent(
             net, codec, data, args.npool, device,
-            crops_per_image=args.crops_per_image if args.same_image_only else None,
+            crops_per_image=(
+                args.crops_per_image
+                if (args.same_image_only and args.target == "knn")
+                else None
+            ),
         )
         if is_main:
             print(f"seed={seed}: pool built in {time.time() - _pool_t0:.0f}s, starting training...")
         y_shape = tuple(Y.shape[1:])
-        embed = g1.make_embed(args.embed, y_shape, seed=seed, device=device)
-        E = embed(Y)
 
-        loss = train_flow_sd3(
-            net, X, X_latent, Ycond_latent, E, args.lams, args.steps, args.N, args.knn,
-            args.lr, device, args.same_image_only, source_ids, grad_accum=args.grad_accum,
-            is_main=is_main,
-        )
+        if args.target == "knn":
+            embed = g1.make_embed(args.embed, y_shape, seed=seed, device=device)
+            E = embed(Y)
+            loss = train_flow_sd3(
+                net, X, X_latent, Ycond_latent, E, args.lams, args.steps, args.N, args.knn,
+                args.lr, device, args.same_image_only, source_ids, grad_accum=args.grad_accum,
+                is_main=is_main,
+            )
+        else:
+            loss = train_flow_sd3_residual(
+                net, X_latent, Ycond_latent, args.steps, args.N, args.lr, device,
+                args.lam_dist, grad_accum=args.grad_accum, is_main=is_main,
+            )
         if is_main:
             print(f"seed={seed} final training loss={loss:.4f}")
 
@@ -718,7 +869,7 @@ def main():
 
         # eval only on rank 0, against rank 0's own local pool -- other
         # ranks' pools were only there to diversify training batches.
-        if is_main:
+        if is_main and args.target == "knn":
             print(f"{'lam':>6} {'PSNR_samp':>10} {'PSNR_mmse':>10} {'condMMD':>12} {'Div(Var_z)':>12}")
             for lam in args.lams:
                 ps, pm, cm, dv = evaluate_sd3(
@@ -728,6 +879,28 @@ def main():
                 )
                 print(f"{lam:>6.2f} {ps:>10.2f} {pm:>10.2f} {cm:>12.4e} {dv:>12.4e}")
                 rows.append({"seed": seed, "lam": lam, "psnr_sample": ps, "psnr_mmse": pm, "cond_mmd": cm, "div": dv})
+        elif is_main:
+            if lpips_fn is None:
+                import lpips as lpips_lib
+
+                lpips_fn = lpips_lib.LPIPS(net="alex").to(device).eval()
+            print(
+                f"{'lam':>6} {'PSNR_samp':>10} {'PSNR_mmse':>10} {'PSNR_dec':>10} "
+                f"{'LPIPS':>10} {'Div(Var_z)':>12}"
+            )
+            for lam in args.lams:
+                ps, pm, pd, dv, lp = evaluate_sd3_residual(
+                    net, codec, X, Y, Ycond_latent, args.eval_N, lam,
+                    args.n_steps, args.n_draws, seed, device, lpips_fn,
+                )
+                print(
+                    f"{lam:>6.2f} {ps:>10.2f} {pm:>10.2f} {pd:>10.2f} "
+                    f"{lp:>10.4f} {dv:>12.4e}"
+                )
+                rows.append({
+                    "seed": seed, "lam": lam, "psnr_sample": ps, "psnr_mmse": pm,
+                    "psnr_decode": pd, "lpips": lp, "div": dv,
+                })
 
     if args.out and is_main:
         os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
@@ -736,8 +909,8 @@ def main():
                 k: getattr(args, k)
                 for k in [
                     "train_root", "max_images", "model_id", "controlnet_layers", "arch",
-                    "quality", "patch", "npool", "knn", "embed", "same_image_only",
-                    "steps", "N", "lams", "seeds",
+                    "quality", "patch", "target", "npool", "knn", "embed", "same_image_only",
+                    "lam_dist", "steps", "N", "lams", "seeds",
                 ]
             },
             "world_size": world_size,
