@@ -99,6 +99,18 @@ import math
 import os
 import sys
 
+# transformers (pulled in by diffusers in SD3LatentFlow.__init__) imports
+# tensorflow at module load when it thinks TF is available. On Kaggle/Colab
+# images TF is preinstalled but often against an incompatible protobuf, so
+# that import dies ("cannot import name 'runtime_version' from
+# 'google.protobuf'") and takes the whole diffusers import down with it. This
+# project is pure torch and never needs the TF/Flax backends -- disable their
+# detection before the first transformers import (hence here at module top,
+# before diffusers is ever reached, not inside __init__). setdefault so an
+# explicit USE_TF=1 in the environment still wins.
+os.environ.setdefault("USE_TF", "0")
+os.environ.setdefault("USE_FLAX", "0")
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
