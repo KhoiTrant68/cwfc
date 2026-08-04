@@ -339,7 +339,9 @@ def train_flow_residual(net, codec, data, steps, N, lr, device, lam_dist="beta",
         loss = F.mse_loss(v, target)
         if lpips_fn is not None:
             x0_hat = (rt + (1.0 - t) * v + x_dec).clamp(0.0, 1.0)
-            w = 0.05 * (1.0 - lam_b).mean()
+            # lpips_weight is the actual scale; (1-lam) downweights the term
+            # toward lam=1 so it never fights the exact MMSE anchor (r1=0) there.
+            w = lpips_weight * (1.0 - lam_b).mean()
             loss = loss + w * lpips_fn(x0_hat * 2 - 1, x * 2 - 1).mean()
         opt.zero_grad()
         loss.backward()
@@ -377,6 +379,13 @@ def evaluate_residual(net, codec, data, N, lam, n_steps, n_draws, seed, device, 
     g1.set_seed(seed + 1)
     x_true = data.sample(N)
     y_hat = codec.condition(x_true)
+    # decode(y_hat) is the codec's own reconstruction -- the lam=1 floor by
+    # construction, and the reference the flow must BEAT to add any value at
+    # all: psnr_sample < psnr_decode means the flow is injecting noise, not
+    # detail (the diagnosis this eval exists to confirm). Constant across lam.
+    x_dec = codec.decode(y_hat)
+    mse_d = float((x_dec - x_true).pow(2).mean().clamp(min=1e-12))
+    psnr_decode = -10 * math.log10(mse_d)
     draws = torch.stack(
         [sample_flow_residual(net, codec, y_hat, lam, n_steps) for _ in range(n_draws)]
     )
@@ -387,7 +396,7 @@ def evaluate_residual(net, codec, data, N, lam, n_steps, n_draws, seed, device, 
     psnr_mmse = -10 * math.log10(mse_m)
     div = float(draws.flatten(2).var(dim=0).mean())
     lpips_val = float(lpips_fn(one * 2 - 1, x_true * 2 - 1).mean()) if lpips_fn is not None else None
-    return psnr_sample, psnr_mmse, div, lpips_val
+    return psnr_sample, psnr_mmse, psnr_decode, div, lpips_val
 
 
 # ---------------------------------------------------------------------------
@@ -708,20 +717,25 @@ def main():
 
             lpips_fn = lpips_lib.LPIPS(net="alex").to(device).eval()
             print(
-                f"{'lam':>6} {'PSNR_samp':>10} {'PSNR_mmse':>10} {'LPIPS':>10} {'Div(Var_z)':>12}"
+                f"{'lam':>6} {'PSNR_samp':>10} {'PSNR_mmse':>10} {'PSNR_dec':>10} "
+                f"{'LPIPS':>10} {'Div(Var_z)':>12}"
             )
             for lam in args.lams:
-                ps, pm, dv, lp = evaluate_residual(
+                ps, pm, pd, dv, lp = evaluate_residual(
                     raw_net, codec, data, args.eval_N, lam, args.n_steps,
                     args.n_draws, seed, device, lpips_fn,
                 )
-                print(f"{lam:>6.2f} {ps:>10.2f} {pm:>10.2f} {lp:>10.4f} {dv:>12.4e}")
+                print(
+                    f"{lam:>6.2f} {ps:>10.2f} {pm:>10.2f} {pd:>10.2f} "
+                    f"{lp:>10.4f} {dv:>12.4e}"
+                )
                 rows.append(
                     {
                         "seed": seed,
                         "lam": lam,
                         "psnr_sample": ps,
                         "psnr_mmse": pm,
+                        "psnr_decode": pd,
                         "lpips": lp,
                         "div": dv,
                     }
